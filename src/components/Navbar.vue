@@ -11,8 +11,7 @@
       </a>
 
       <div class="nav-item text-secondary">
-        Tool by <a href="https://labs4.tech">Labs4Tech</a> Powered By
-        <img src="/src/assets/images/logo-googlemaps.png" width="100" alt="">
+        
       </div>
     </div>
   </nav>

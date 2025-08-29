@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {ref} from 'vue';
+import { ref } from 'vue';
 import {LOADING, MAX_SELECTABLE_ADDRESSES, MY_LOCATION, WELCOME_MESSAGE} from "../constants.ts";
 import AddressComponent from "../components/AddressComponent.vue";
 import {SelectionState} from "../interfaces.ts"; // Correct the path to your component
@@ -15,18 +15,16 @@ const selection_state = ref<SelectionState>({
 });
 
 const availableTransportationMethods = ['Driving', 'Walking', 'Bicycling'];
-// const availableOptimizationOptions = ['Fastest',];
 
 const handleAddressSelected = (newAddress: object, index: number) => {
-  selection_state.value.selectedAddresses[index] = newAddress; // Update the address in the array
+  selection_state.value.selectedAddresses[index] = newAddress;
 };
 
 const removeSelectedAddress = (index: number) => {
-  selection_state.value.selectedAddresses.splice(index, 1); // Remove the address from the array
+  selection_state.value.selectedAddresses.splice(index, 1); 
 };
 
 const getOptimumRoute = () => {
-  // selection_state.value.optimumRouteAddressOrder = selection_state.value.selectedAddresses; //temporary value for moving forward
   selection_state.value.optimumRouteAddressOrder = LOADING;
 }
 
@@ -36,15 +34,12 @@ const getGoogleMapsRouteLink = ():string =>{
 
   const googleMapsBaseUrl = "https://www.google.com/maps/dir/?api=1";
 
-  // destination
   const optimumAddressCount = selection_state.value.optimumRouteAddressOrder.length;
   const destinationPlace = selection_state.value.optimumRouteAddressOrder[optimumAddressCount-1];
   const destinationParameter = `&destination_place_id=${destinationPlace.place_id}&destination=${destinationPlace.formatted_address}`;
 
 
-  // Use filter to skip the origin (index 0) and destination (last index)
   const waypointPlaces = selection_state.value.optimumRouteAddressOrder.filter((_, index) => index > 0 && index < optimumAddressCount - 1);
-  // Join formatted addresses and place IDs with "|"
   const waypointsParameter = "&waypoints="+waypointPlaces.map(address => address.formatted_address).join("|");
   const waypointPlaceIdsParameter = "&waypoint_place_ids="+waypointPlaces.map(address => address.place_id).join("|");
 
