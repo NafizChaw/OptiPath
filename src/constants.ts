@@ -1,4 +1,4 @@
-export const MAX_SELECTABLE_ADDRESSES = 4;
+export const MAX_SELECTABLE_ADDRESSES = 9;
 export const WELCOME_MESSAGE = '  Optipath is the ultimate route optimization app designed to help you plan efficient journeys to multiple\n' +
     '  destinations. Whether you\'re a delivery driver, a sales representative, or a traveler exploring new places,\n' +
     '  RouteMaster simplifies the process of mapping out the best route to reach all your stops. With intelligent algorithms,\n' +

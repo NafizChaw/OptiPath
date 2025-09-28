@@ -1,12 +1,11 @@
 <template>
   <div>
-    <div ref="mapRef" style="width: 100%; height: 400px;"></div>
+    <div ref="mapRef" style="width: 100%; height: 420px;"></div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, watch } from "vue";
-/// <reference types="google.maps" />
 
 const props = defineProps<{
   addresses: Array<any>,
@@ -14,64 +13,81 @@ const props = defineProps<{
 }>();
 
 const mapRef = ref<HTMLDivElement | null>(null);
-let map: any;
-let directionsService: any;
-let directionsRenderer: any;
+let map: google.maps.Map | null = null;
+let directionsService: google.maps.DirectionsService | null = null;
+let directionsRenderer: google.maps.DirectionsRenderer | null = null;
 
-const loadGoogleMapsScript = (callback: () => void) => {
-  if (!window.google || !(window.google as any).maps) {
-    const script = document.createElement("script");
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${
-      import.meta.env.VITE_GOOGLE_MAPS_API_KEY
-    }&libraries=places`;
-    script.async = true;
-    script.defer = true;
-    script.onload = callback;
-    document.head.appendChild(script);
-  } else {
-    callback();
+function loadGoogleMapsScript(cb: () => void) {
+  if (window.google?.maps) return cb();
+  const s = document.createElement("script");
+  s.src = `https://maps.googleapis.com/maps/api/js?key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}&libraries=places`;
+  s.async = true;
+  s.defer = true;
+  s.onload = cb;
+  document.head.appendChild(s);
+}
+
+function toGMode(mode: string): google.maps.TravelMode {
+  switch (mode) {
+    case "Walking":  return google.maps.TravelMode.WALKING;
+    case "Bicycling":return google.maps.TravelMode.BICYCLING;
+    default:         return google.maps.TravelMode.DRIVING;
   }
-};
+}
 
-const renderRoute = () => {
+async function renderRoute() {
+  if (!map || !directionsService || !directionsRenderer) return;
   if (!props.addresses || props.addresses.length < 2) return;
 
-  const origin = props.addresses[0];
-  const destination = props.addresses[props.addresses.length - 1];
-  const waypoints = props.addresses
-    .slice(1, -1)
-    .map((a) => ({ location: a.formatted_address, stopover: true }));
+  const first = props.addresses[0];
+  const origin: string | google.maps.LatLngLiteral =
+    (first?.isCurrentLocation && first?.latLng)
+      ? first.latLng
+      : (first?.formatted_address || "");
+
+  const destObj = props.addresses[props.addresses.length - 1];
+  const destination: string | google.maps.LatLngLiteral =
+    (destObj?.isCurrentLocation && destObj?.latLng)
+      ? destObj.latLng
+      : (destObj?.formatted_address || "");
+
+  const waypoints = props.addresses.slice(1, -1).map(a => ({
+    location: (a?.isCurrentLocation && a?.latLng) ? a.latLng : a.formatted_address,
+    stopover: true
+  }));
 
   directionsService.route(
     {
-      origin: origin.formatted_address,
-      destination: destination.formatted_address,
-      waypoints: waypoints,
-      travelMode: props.travelMode.toUpperCase() as google.maps.TravelMode,
+      origin,
+      destination,
+      waypoints,
+      travelMode: toGMode(props.travelMode),
+      optimizeWaypoints: false, // keep given order
     },
-    (result, status) => {
-      if (status === "OK" && result) {
-        directionsRenderer.setDirections(result);
+    (res, status) => {
+      if (status === "OK" && res) {
+        directionsRenderer.setDirections(res);
+        const bounds = new google.maps.LatLngBounds();
+        res.routes[0].overview_path.forEach(p => bounds.extend(p));
+        map!.fitBounds(bounds);
       } else {
-        console.error("Directions request failed:", status);
+        console.error("Directions failed:", status);
       }
     }
   );
-};
+}
 
-onMounted(() => {
-  loadGoogleMapsScript(() => {
-    map = new google.maps.Map(mapRef.value as HTMLElement, {
-      zoom: 7,
-      center: { lat: 27.994402, lng: -81.760254 }, // Florida center (adjust as needed)
-    });
-    directionsService = new google.maps.DirectionsService();
-    directionsRenderer = new google.maps.DirectionsRenderer();
-    directionsRenderer.setMap(map);
-    renderRoute();
+function initMap() {
+  map = new google.maps.Map(mapRef.value as HTMLElement, {
+    zoom: 6,
+    center: { lat: 27.994402, lng: -81.760254 },
   });
-});
+  directionsService = new google.maps.DirectionsService();
+  directionsRenderer = new google.maps.DirectionsRenderer({ suppressMarkers: false });
+  directionsRenderer.setMap(map);
+  renderRoute();
+}
 
-// re-render when addresses or travelMode changes
+onMounted(() => loadGoogleMapsScript(initMap));
 watch(() => [props.addresses, props.travelMode], renderRoute, { deep: true });
 </script>
