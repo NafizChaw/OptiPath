@@ -10,6 +10,7 @@ import AddressComponent from "../components/AddressComponent.vue";
 import MapComponent from "../components/MapComponent.vue";
 import type { SelectionState } from "../interfaces";
 import { computeBestRoute, suggestBestDeparture } from "../algo/computeBestRoute";
+import Draggable from 'vuedraggable'
 
 // ---- state ----
 const selection_state = ref<SelectionState>({
@@ -24,9 +25,18 @@ const selection_state = ref<SelectionState>({
 const availableTransportationMethods = ["Driving", "Walking", "Bicycling"];
 const canProceed = computed(() => selection_state.value.selectedAddresses.length >= 2);
 
+function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
+  if ((obj as any)?.uid) return obj as any; 
+  const uid = (globalThis.crypto as any)?.randomUUID?.() || String(Date.now() + Math.random()); 
+  return { ...obj, uid };
+}
+
 // ---- helpers ----
-const handleAddressSelected = (newAddress: any, index: number) => {
-  selection_state.value.selectedAddresses[index] = newAddress;
+const handleAddressSelected = (newAddress: any, index: number) => { 
+  selection_state.value.selectedAddresses[index] = withUid(newAddress);
+  if (selection_state.value.optimumRouteAddressOrder) { 
+    selection_state.value.optimumRouteAddressOrder = null;
+  }
 };
 
 const removeSelectedAddress = (index: number) => {
@@ -36,6 +46,11 @@ const removeSelectedAddress = (index: number) => {
   }
 };
 
+async function onReordered() {
+  selection_state.value.optimumRouteAddressOrder = null;
+  await optimizeRoute();
+}
+
 async function useCurrentLocationAsOrigin() {
   try {
     const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
@@ -43,11 +58,14 @@ async function useCurrentLocationAsOrigin() {
         ? navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 })
         : reject(new Error("Geolocation not supported"));
     });
-    selection_state.value.selectedAddresses[0] = {
+    selection_state.value.selectedAddresses[0] = withUid({
       formatted_address: 'Current Location',
       isCurrentLocation: true,
       latLng: { lat: pos.coords.latitude, lng: pos.coords.longitude }
-    };
+    });
+    if (selection_state.value.optimumRouteAddressOrder) {
+      selection_state.value.optimumRouteAddressOrder = null;
+    }
   } catch {
     alert("Could not get current location. Please allow location access.");
   }
@@ -206,14 +224,41 @@ function appleMapsLink(addresses: any[], mode: string): string {
           <h2>Addresses</h2>
           <h5>Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses</h5>
 
-          <ul class="mt-3">
-            <li v-for="(address, index) in selection_state.selectedAddresses" :key="index">
-              Stop {{ index + 1 }}: {{ address.formatted_address }}
-              <button v-if="!address?.isCurrentLocation"
-                      class="btn btn-danger btn-sm ms-2"
-                      @click="removeSelectedAddress(index)">Remove</button>
-            </li>
-          </ul>
+          <Draggable
+            v-model="selection_state.selectedAddresses"  
+            item-key="uid"                                
+            handle=".drag-handle"                   
+            @end="onReordered"                           
+            class="list-unstyled mt-3"
+            :animation="180"
+            ghost-class="drag-ghost"
+            :delay="120"
+            :delay-on-touch-only="true"
+          >
+            <template #item="{ element, index }">  
+              <li class="d-flex align-items-center gap-2 py-1">
+                <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+                <div class="d-flex flex-column">
+                  <strong class="stop-name">
+                    {{ element.name || element.formatted_address }}
+                  </strong>
+
+                  <!-- <small v-if="element.name" class="stop-address">
+                    {{ element.formatted_address }}
+                  </small> -->
+                </div>
+                <button
+                v-if="!element?.isCurrentLocation"
+                class="btn btn-danger btn-sm ms-2"
+                @click="removeSelectedAddress(index)"
+                >
+                  Remove
+                </button>
+              </li>
+              
+            </template>
+          </Draggable>
+
           <hr/>
 
           <button v-if="selection_state.selectedAddresses.length === 0"
@@ -282,4 +327,34 @@ function appleMapsLink(addresses: any[], mode: string): string {
 .hover-primary:hover { border-color: var(--bs-primary) !important; }
 .cursor-pointer:hover { cursor: pointer; }
 .card.active { border-color: var(--bs-secondary); border-width: 3px; }
+
+.drag-handle {
+  user-select: none;
+  font-weight: 700;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--text);
+  
+}
+.drag-handle:hover { cursor: grab; }
+.drag-ghost {
+  opacity: 0.7;
+  background: var(--card);
+  border: 1px dashed var(--border);
+}
+.stop-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.stop-address {
+  font-size: 0.85em;
+  color: var(--text);
+  opacity: 0.7;
+}
+
+
 </style>
+
