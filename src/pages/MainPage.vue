@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import {
   MAX_SELECTABLE_ADDRESSES,
   MY_LOCATION,
@@ -15,11 +15,14 @@ import Draggable from 'vuedraggable'
 // ---- state ----
 const selection_state = ref<SelectionState>({
   welcomeAcknowledged: false,
+  startModeChosen: false,
+  useCurrentLocation: false,
   addressSelectionCompleted: false,
   selectedAddresses: [],
   optimumRouteAddressOrder: null,
   travelMode: "Driving",
   routeOption: "Fastest",
+  startIndex: 0,
 });
 
 const availableTransportationMethods = ["Driving", "Walking", "Bicycling"];
@@ -41,6 +44,9 @@ const handleAddressSelected = (newAddress: any, index: number) => {
 
 const removeSelectedAddress = (index: number) => {
   selection_state.value.selectedAddresses.splice(index, 1);
+  if (selection_state.value.startIndex > index) {
+    selection_state.value.startIndex--;
+  }
   if (selection_state.value.optimumRouteAddressOrder) {
     selection_state.value.optimumRouteAddressOrder = null;
   }
@@ -55,24 +61,68 @@ async function useCurrentLocationAsOrigin() {
   try {
     const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
       navigator.geolocation
-        ? navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 })
+        ? navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+          })
         : reject(new Error("Geolocation not supported"));
     });
-    selection_state.value.selectedAddresses[0] = withUid({
-      formatted_address: 'Current Location',
+
+    const myLoc = withUid({
+      formatted_address: "Current Location",
       isCurrentLocation: true,
-      latLng: { lat: pos.coords.latitude, lng: pos.coords.longitude }
+      latLng: { lat: pos.coords.latitude, lng: pos.coords.longitude },
     });
-    if (selection_state.value.optimumRouteAddressOrder) {
-      selection_state.value.optimumRouteAddressOrder = null;
+
+    const idx = selection_state.value.selectedAddresses.findIndex(
+      (a) => a?.isCurrentLocation
+    );
+
+    if (idx === -1) {
+      selection_state.value.selectedAddresses.push(myLoc);
+      selection_state.value.startIndex =
+        selection_state.value.selectedAddresses.length - 1;
+    } else {
+      const existing = selection_state.value.selectedAddresses[idx];
+      selection_state.value.selectedAddresses[idx] = {
+        ...myLoc,
+        uid: existing?.uid ?? myLoc.uid,
+      };
+      selection_state.value.startIndex = idx;
     }
+
+    selection_state.value.useCurrentLocation = true;
   } catch {
     alert("Could not get current location. Please allow location access.");
   }
 }
 
+// ---- start-mode handlers ----
+function chooseCurrent() {
+  selection_state.value.startModeChosen = true;
+  selection_state.value.useCurrentLocation = true;
+  useCurrentLocationAsOrigin();
+}
+function chooseDifferent() {
+  selection_state.value.startModeChosen = true;
+  selection_state.value.useCurrentLocation = false;
+}
+
+// ---- preview/optimization ----
+function rotateToStartIndex<T>(arr: T[], startIndex: number): T[] {
+  if (!arr?.length) return [];
+  const i = Math.max(0, Math.min(startIndex ?? 0, arr.length - 1));
+  return [...arr.slice(i), ...arr.slice(0, i)];
+}
+
+const bestDepartureHint = ref<string | null>(null);
+
 const previewRoute = () => {
-  selection_state.value.optimumRouteAddressOrder = null;
+  const rotated = rotateToStartIndex(
+    selection_state.value.selectedAddresses,
+    selection_state.value.startIndex ?? 0
+  );
+  selection_state.value.optimumRouteAddressOrder = rotated as any;
   selection_state.value.addressSelectionCompleted = true;
 };
 
@@ -93,14 +143,13 @@ async function ensureGoogleLoaded(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const s = document.createElement("script");
     s.src = `https://maps.googleapis.com/maps/api/js?key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}&libraries=places`;
-    s.async = true; s.defer = true;
+    s.async = true;
+    s.defer = true;
     s.onload = () => resolve();
     s.onerror = () => reject(new Error("Failed to load Google Maps JS"));
     document.head.appendChild(s);
   });
 }
-
-const bestDepartureHint = ref<string | null>(null);
 
 const optimizeRoute = async () => {
   const stops = selection_state.value.selectedAddresses;
@@ -116,18 +165,18 @@ const optimizeRoute = async () => {
     const mode = toGMode(selection_state.value.travelMode);
 
     const { order } = await computeBestRoute(addresses, mode, {
-      startIndex: 0,
+      startIndex: selection_state.value.startIndex ?? 0,
       returnToStart: false,
       departureTime: new Date()
     });
 
     selection_state.value.optimumRouteAddressOrder = order.map(i => stops[i]);
 
-    // small “leave later” suggestion (0,15,30 min)
     try {
-      const hint = await suggestBestDeparture(
-        addresses, mode, [0, 15, 30], { startIndex: 0, returnToStart: false }
-      );
+      const hint = await suggestBestDeparture(addresses, mode, [0, 15, 30], {
+        startIndex: selection_state.value.startIndex ?? 0,
+        returnToStart: false
+      });
       bestDepartureHint.value =
         hint.bestOffsetMin > 0
           ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(hint.bestSeconds/60)} min total).`
@@ -210,112 +259,186 @@ function appleMapsLink(addresses: any[], mode: string): string {
   <div class="container mt-4">
     <div class="row justify-content-center">
       <div class="col-12 col-lg-8">
-        <!-- Welcome -->
+
+        <!-- Step 1: Welcome -->
         <template v-if="!selection_state.welcomeAcknowledged">
           <h2>Welcome to OptiPath</h2>
           <p>{{ WELCOME_MESSAGE }}</p>
-          <button class="btn btn-primary btn-sm mt-3" @click="selection_state.welcomeAcknowledged = true">
+          <button
+            class="btn btn-primary btn-sm mt-3"
+            @click="selection_state.welcomeAcknowledged = true"
+          >
             GET STARTED
           </button>
         </template>
 
-        <!-- Address collection -->
-        <template v-else-if="selection_state.welcomeAcknowledged && !selection_state.addressSelectionCompleted">
+        <!-- Step 2: Choose start mode -->
+        <template
+          v-else-if="!selection_state.startModeChosen"
+        >
+          <h2>Choose Start Location</h2>
+
+          <hr />
+
+          <p>Select how you’d like to set your starting point.</p>
+          <div class="d-flex gap-3 mt-3">
+            <button class="btn btn-primary btn-sm" @click="chooseCurrent">
+              Use Current Location
+            </button>
+            <button class="btn btn-secondary btn-sm" @click="chooseDifferent">
+              Use Different Location
+            </button>
+          </div>
+        </template>
+
+        <!-- Step 3: Address entry -->
+        <template v-else-if="!selection_state.addressSelectionCompleted">
           <h2>Addresses</h2>
-          <h5>Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses</h5>
+          <h5>
+            Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses
+          </h5>
 
           <Draggable
-            v-model="selection_state.selectedAddresses"  
-            item-key="uid"                                
-            handle=".drag-handle"                   
-            @end="onReordered"                           
+            v-model="selection_state.selectedAddresses"
+            item-key="uid"
+            handle=".drag-handle"
+            @end="onReordered"
             class="list-unstyled mt-3"
             :animation="180"
             ghost-class="drag-ghost"
             :delay="120"
             :delay-on-touch-only="true"
           >
-            <template #item="{ element, index }">  
+            <template #item="{ element, index }">
               <li class="d-flex align-items-center gap-2 py-1">
                 <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
                 <div class="d-flex flex-column">
                   <strong class="stop-name">
                     {{ element.name || element.formatted_address }}
                   </strong>
-
-                  <!-- <small v-if="element.name" class="stop-address">
-                    {{ element.formatted_address }}
-                  </small> -->
                 </div>
                 <button
-                v-if="!element?.isCurrentLocation"
-                class="btn btn-danger btn-sm ms-2"
-                @click="removeSelectedAddress(index)"
+                  v-if="!element?.isCurrentLocation"
+                  class="btn btn-danger btn-sm ms-2"
+                  @click="removeSelectedAddress(index)"
                 >
                   Remove
                 </button>
               </li>
-              
             </template>
           </Draggable>
 
-          <hr/>
+          <hr />
 
-          <button v-if="selection_state.selectedAddresses.length === 0"
-                  class="btn btn-outline-primary btn-sm"
-                  @click="useCurrentLocationAsOrigin">
-            Use Current Location as Origin
-          </button>
-
-          <div v-else-if="selection_state.selectedAddresses.length < MAX_SELECTABLE_ADDRESSES" class="mt-3">
+          <div
+            v-if="selection_state.selectedAddresses.length < MAX_SELECTABLE_ADDRESSES"
+            class="mt-3"
+          >
             <label class="form-label">Add an address</label>
-            <AddressComponent @addressSelected="handleAddressSelected($event, selection_state.selectedAddresses.length)"/>
+            <AddressComponent
+              @addressSelected="handleAddressSelected($event, selection_state.selectedAddresses.length)"
+            />
           </div>
 
           <div class="d-flex gap-2 mt-3">
-            <button class="btn btn-secondary btn-sm" @click="previewRoute" :disabled="!canProceed">Preview route</button>
-            <button class="btn btn-primary btn-sm" @click="selection_state.addressSelectionCompleted = true" :disabled="!canProceed">Next</button>
+            <button
+              class="btn btn-secondary btn-sm"
+              @click="previewRoute"
+              :disabled="!canProceed"
+            >
+              Preview route
+            </button>
+            <button
+              class="btn btn-primary btn-sm"
+              @click="selection_state.addressSelectionCompleted = true"
+              :disabled="!canProceed"
+            >
+              Next
+            </button>
           </div>
         </template>
 
-        <!-- Preview / Optimize -->
+        <!-- Step 4: Preview/Optimize -->
         <template v-else>
           <h2>Route</h2>
           <div class="mb-3">
             <label class="form-label">Mode</label>
-            <select class="form-select" :value="selection_state.travelMode" @change="(e:any)=>selection_state.travelMode = e.target.value">
-              <option v-for="m in availableTransportationMethods" :key="m" :value="m">{{ m }}</option>
+            <select
+              class="form-select"
+              :value="selection_state.travelMode"
+              @change="(e:any)=>selection_state.travelMode = e.target.value"
+            >
+              <option
+                v-for="m in availableTransportationMethods"
+                :key="m"
+                :value="m"
+              >
+                {{ m }}
+              </option>
             </select>
           </div>
 
           <MapComponent
-            :addresses="(selection_state.optimumRouteAddressOrder && selection_state.optimumRouteAddressOrder !== 'loading')
-              ? (selection_state.optimumRouteAddressOrder as any[])
-              : selection_state.selectedAddresses"
+            :addresses="
+              selection_state.optimumRouteAddressOrder &&
+              selection_state.optimumRouteAddressOrder !== 'loading'
+                ? (selection_state.optimumRouteAddressOrder as any[])
+                : selection_state.selectedAddresses
+            "
             :travelMode="selection_state.travelMode"
           />
 
-          <div class="text-center mt-3" v-if="selection_state.optimumRouteAddressOrder === LOADING">
+          <div
+            class="text-center mt-3"
+            v-if="selection_state.optimumRouteAddressOrder === LOADING"
+          >
             Calculating optimum route…
           </div>
 
-          <p v-if="bestDepartureHint" class="mt-2 text-muted">{{ bestDepartureHint }}</p>
+          <p v-if="bestDepartureHint" class="mt-2 text-muted">
+            {{ bestDepartureHint }}
+          </p>
 
           <div class="d-flex flex-wrap gap-2 mt-3">
-            <button class="btn btn-outline-secondary btn-sm" @click="previewRoute">Show entered order</button>
-            <button class="btn btn-primary btn-sm" @click="optimizeRoute">Optimize order</button>
+            <button
+              class="btn btn-outline-secondary btn-sm"
+              @click="previewRoute"
+            >
+              Show entered order
+            </button>
+            <button class="btn btn-primary btn-sm" @click="optimizeRoute">
+              Optimize order
+            </button>
 
-            <a class="btn btn-success btn-sm"
-               :href="googleMapsLink((selection_state.optimumRouteAddressOrder && selection_state.optimumRouteAddressOrder !== 'loading')
-                 ? (selection_state.optimumRouteAddressOrder as any[])
-                 : selection_state.selectedAddresses, selection_state.travelMode)"
-               target="_blank">Open in Google Maps</a>
+            <a
+              class="btn btn-success btn-sm"
+              :href="
+                googleMapsLink(
+                  selection_state.optimumRouteAddressOrder &&
+                  selection_state.optimumRouteAddressOrder !== 'loading'
+                    ? (selection_state.optimumRouteAddressOrder as any[])
+                    : selection_state.selectedAddresses,
+                  selection_state.travelMode
+                )
+              "
+              target="_blank"
+              >Open in Google Maps</a
+            >
 
-            <a class="btn btn-dark btn-sm"
-               :href="appleMapsLink((selection_state.optimumRouteAddressOrder && selection_state.optimumRouteAddressOrder !== 'loading')
-                 ? (selection_state.optimumRouteAddressOrder as any[])
-                 : selection_state.selectedAddresses, selection_state.travelMode)"
-               target="_blank">Open in Apple Maps</a>
+            <a
+              class="btn btn-dark btn-sm"
+              :href="
+                appleMapsLink(
+                  selection_state.optimumRouteAddressOrder &&
+                  selection_state.optimumRouteAddressOrder !== 'loading'
+                    ? (selection_state.optimumRouteAddressOrder as any[])
+                    : selection_state.selectedAddresses,
+                  selection_state.travelMode
+                )
+              "
+              target="_blank"
+              >Open in Apple Maps</a
+            >
           </div>
         </template>
       </div>
