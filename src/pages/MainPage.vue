@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed } from "vue";
 import {
   MAX_SELECTABLE_ADDRESSES,
-  MY_LOCATION,
   WELCOME_MESSAGE,
   LOADING,
 } from "../constants";
@@ -10,9 +9,9 @@ import AddressComponent from "../components/AddressComponent.vue";
 import MapComponent from "../components/MapComponent.vue";
 import type { SelectionState } from "../interfaces";
 import { computeBestRoute, suggestBestDeparture } from "../algo/computeBestRoute";
-import Draggable from 'vuedraggable'
+import Draggable from "vuedraggable";
 
-// ---- state ----
+// ---------- state ----------
 const selection_state = ref<SelectionState>({
   welcomeAcknowledged: false,
   startModeChosen: false,
@@ -26,46 +25,67 @@ const selection_state = ref<SelectionState>({
 });
 
 const availableTransportationMethods = ["Driving", "Walking", "Bicycling"];
-const canProceed = computed(() => selection_state.value.selectedAddresses.length >= 2);
+const canProceed = computed(
+  () => selection_state.value.selectedAddresses.length >= 2
+);
 
+// NEW: simple constraints state (UI -> algo)
+const prereqsByUid = ref<Record<string, string[]>>({}); // afterUid -> [beforeUid,...]
+const finishUid = ref<string | null>(null);
+
+// ---------- helpers ----------
 function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
-  if ((obj as any)?.uid) return obj as any; 
-  const uid = (globalThis.crypto as any)?.randomUUID?.() || String(Date.now() + Math.random()); 
+  if ((obj as any)?.uid) return obj as any;
+  const uid =
+    (globalThis.crypto as any)?.randomUUID?.() ||
+    String(Date.now() + Math.random());
   return { ...obj, uid };
 }
 
-// ---- helpers ----
-const handleAddressSelected = (newAddress: any, index: number) => { 
+const handleAddressSelected = (newAddress: any, index: number) => {
   selection_state.value.selectedAddresses[index] = withUid(newAddress);
-  if (selection_state.value.optimumRouteAddressOrder) { 
-    selection_state.value.optimumRouteAddressOrder = null;
-  }
+  selection_state.value.optimumRouteAddressOrder = null;
 };
 
 const removeSelectedAddress = (index: number) => {
-  selection_state.value.selectedAddresses.splice(index, 1);
+  const removed = selection_state.value.selectedAddresses.splice(index, 1)[0];
+
+  // clean constraints referencing removed stop
+  if (removed?.uid) {
+    // remove as "finish"
+    if (finishUid.value === removed.uid) finishUid.value = null;
+    // remove from all prereq arrays
+    for (const k of Object.keys(prereqsByUid.value)) {
+      prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(
+        (u) => u !== removed.uid
+      );
+      if (!prereqsByUid.value[k].length) delete prereqsByUid.value[k];
+    }
+    // remove key if it existed
+    delete prereqsByUid.value[removed.uid];
+  }
+
   if (selection_state.value.startIndex > index) {
     selection_state.value.startIndex--;
   }
-  if (selection_state.value.optimumRouteAddressOrder) {
-    selection_state.value.optimumRouteAddressOrder = null;
-  }
+  selection_state.value.optimumRouteAddressOrder = null;
 };
 
 async function onReordered() {
   selection_state.value.optimumRouteAddressOrder = null;
-  await optimizeRoute();
+  // optional: auto re-optimize on drag end
+  // await optimizeRoute();
 }
 
 async function useCurrentLocationAsOrigin() {
   try {
     const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-      navigator.geolocation
-        ? navigator.geolocation.getCurrentPosition(resolve, reject, {
-            enableHighAccuracy: true,
-            timeout: 10000,
-          })
-        : reject(new Error("Geolocation not supported"));
+      if (!navigator.geolocation) return reject(new Error("No geolocation"));
+      navigator.geolocation.getCurrentPosition(
+        resolve,
+        reject,
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
     });
 
     const myLoc = withUid({
@@ -79,9 +99,8 @@ async function useCurrentLocationAsOrigin() {
     );
 
     if (idx === -1) {
-      selection_state.value.selectedAddresses.push(myLoc);
-      selection_state.value.startIndex =
-        selection_state.value.selectedAddresses.length - 1;
+      selection_state.value.selectedAddresses.unshift(myLoc);
+      selection_state.value.startIndex = 0;
     } else {
       const existing = selection_state.value.selectedAddresses[idx];
       selection_state.value.selectedAddresses[idx] = {
@@ -97,7 +116,7 @@ async function useCurrentLocationAsOrigin() {
   }
 }
 
-// ---- start-mode handlers ----
+// ---------- start-mode handlers ----------
 function chooseCurrent() {
   selection_state.value.startModeChosen = true;
   selection_state.value.useCurrentLocation = true;
@@ -108,7 +127,7 @@ function chooseDifferent() {
   selection_state.value.useCurrentLocation = false;
 }
 
-// ---- preview/optimization ----
+// ---------- preview / optimization ----------
 function rotateToStartIndex<T>(arr: T[], startIndex: number): T[] {
   if (!arr?.length) return [];
   const i = Math.max(0, Math.min(startIndex ?? 0, arr.length - 1));
@@ -128,14 +147,43 @@ const previewRoute = () => {
 
 function toGMode(mode: string): google.maps.TravelMode {
   switch (mode) {
-    case "Walking": return google.maps.TravelMode.WALKING;
-    case "Bicycling": return google.maps.TravelMode.BICYCLING;
-    default: return google.maps.TravelMode.DRIVING;
+    case "Walking":
+      return google.maps.TravelMode.WALKING;
+    case "Bicycling":
+      return google.maps.TravelMode.BICYCLING;
+    default:
+      return google.maps.TravelMode.DRIVING;
   }
 }
 
 function normalizeForMatrix(a: any): string | google.maps.LatLngLiteral {
-  return (a?.isCurrentLocation && a?.latLng) ? a.latLng : (a.formatted_address || a.name);
+  return a?.isCurrentLocation && a?.latLng
+    ? a.latLng
+    : a.formatted_address || a.name;
+}
+
+function buildConstraintIndexes(stops: any[]) {
+  // map uids to indexes
+  const idOf: Record<string, number> = {};
+  stops.forEach((s, i) => (idOf[s.uid] = i));
+
+  // convert UI prereqsByUid (afterUid -> [beforeUid]) into index mapping
+  const prerequisites: Record<number, number[]> = {};
+  for (const [afterUid, befores] of Object.entries(prereqsByUid.value)) {
+    if (!(afterUid in idOf)) continue;
+    const afterIdx = idOf[afterUid];
+    for (const b of befores || []) {
+      if (b in idOf) (prerequisites[afterIdx] ||= []).push(idOf[b]);
+    }
+  }
+
+  // endIndex from finishUid
+  const endIndex =
+    finishUid.value && finishUid.value in idOf
+      ? idOf[finishUid.value]
+      : undefined;
+
+  return { prerequisites, endIndex };
 }
 
 async function ensureGoogleLoaded(): Promise<void> {
@@ -164,32 +212,45 @@ const optimizeRoute = async () => {
     const addresses = stops.map(normalizeForMatrix);
     const mode = toGMode(selection_state.value.travelMode);
 
-    const { order } = await computeBestRoute(addresses, mode, {
+    const { prerequisites, endIndex } = buildConstraintIndexes(stops);
+
+    const { order } = await computeBestRoute(addresses as any, mode, {
       startIndex: selection_state.value.startIndex ?? 0,
       returnToStart: false,
-      departureTime: new Date()
+      departureTime: new Date(),
+      prerequisites,
+      endIndex,
     });
 
-    selection_state.value.optimumRouteAddressOrder = order.map(i => stops[i]);
+    selection_state.value.optimumRouteAddressOrder = order.map((i) => stops[i]);
 
+    // small “leave later” hint sweep (keep light for quota)
     try {
-      const hint = await suggestBestDeparture(addresses, mode, [0, 15, 30], {
+      const hint = await suggestBestDeparture(addresses as any, mode, [0, 15, 30], {
         startIndex: selection_state.value.startIndex ?? 0,
-        returnToStart: false
+        returnToStart: false,
+        prerequisites,
+        endIndex,
       });
       bestDepartureHint.value =
         hint.bestOffsetMin > 0
-          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(hint.bestSeconds/60)} min total).`
-          : `Leaving now is best (≈ ${Math.round(hint.bestSeconds/60)} min total).`;
-    } catch { bestDepartureHint.value = null; }
+          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(
+              hint.bestSeconds / 60
+            )} min total).`
+          : `Leaving now is best (≈ ${Math.round(hint.bestSeconds / 60)} min total).`;
+    } catch {
+      bestDepartureHint.value = null;
+    }
   } catch (e) {
     console.error(e);
-    alert("Optimization failed. Ensure Maps JS & Distance Matrix are enabled and billing is on, and disable ad blockers.");
+    alert(
+      "Optimization failed. Make sure Google Maps JS & Distance Matrix are enabled (with billing) and any ad blockers are disabled for this site."
+    );
     selection_state.value.optimumRouteAddressOrder = null;
   }
 };
 
-// ---- external links ----
+// ---------- external links ----------
 function googleMapsLink(addresses: any[], mode: string): string {
   if (!addresses || addresses.length < 2) return "#";
   const base = "https://www.google.com/maps/dir/?api=1";
@@ -229,7 +290,9 @@ function googleMapsLink(addresses: any[], mode: string): string {
   return `${base}&${parts.join("&")}`;
 }
 
-function appleDirFlag(mode: string) { return mode === "Walking" ? "w" : "d"; }
+function appleDirFlag(mode: string) {
+  return mode === "Walking" ? "w" : "d"; // Apple has no bike flag; default to driving
+}
 function appleMapsLink(addresses: any[], mode: string): string {
   if (!addresses || addresses.length < 2) return "#";
   const base = "https://maps.apple.com/";
@@ -243,9 +306,10 @@ function appleMapsLink(addresses: any[], mode: string): string {
   const dests = addresses
     .slice(1)
     .map((a: any, idx: number) => {
-      const encoded = a?.isCurrentLocation && a?.latLng
-        ? `${a.latLng.lat},${a.latLng.lng}`
-        : encodeURIComponent(a.formatted_address);
+      const encoded =
+        a?.isCurrentLocation && a?.latLng
+          ? `${a.latLng.lat},${a.latLng.lng}`
+          : encodeURIComponent(a.formatted_address);
       return idx === 0 ? encoded : `to:${encoded}`;
     })
     .join(" ");
@@ -253,13 +317,43 @@ function appleMapsLink(addresses: any[], mode: string): string {
   const dirflg = appleDirFlag(mode);
   return `${base}?saddr=${saddr}&daddr=${dests}&dirflg=${dirflg}`;
 }
+
+// ---------- UI helpers for constraints ----------
+function toggleFinish(uid: string) {
+  finishUid.value = finishUid.value === uid ? null : uid;
+  selection_state.value.optimumRouteAddressOrder = null;
+}
+
+function currentAfterFor(beforeUid: string): string {
+  // find any "after" that lists this uid as a prerequisite
+  for (const [after, befores] of Object.entries(prereqsByUid.value)) {
+    if ((befores || []).includes(beforeUid)) return after;
+  }
+  return "";
+}
+
+function setMustComeBefore(beforeUid: string, afterUid: string) {
+  // clear previous association for this "before"
+  for (const k of Object.keys(prereqsByUid.value)) {
+    prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(
+      (u) => u !== beforeUid
+    );
+    if (!prereqsByUid.value[k].length) delete prereqsByUid.value[k];
+  }
+  // set new association if any
+  if (afterUid) {
+    const arr = prereqsByUid.value[afterUid] || [];
+    if (!arr.includes(beforeUid)) arr.push(beforeUid);
+    prereqsByUid.value[afterUid] = arr;
+  }
+  selection_state.value.optimumRouteAddressOrder = null;
+}
 </script>
 
 <template>
   <div class="container mt-4">
     <div class="row justify-content-center">
       <div class="col-12 col-lg-8">
-
         <!-- Step 1: Welcome -->
         <template v-if="!selection_state.welcomeAcknowledged">
           <h2>Welcome to OptiPath</h2>
@@ -273,15 +367,11 @@ function appleMapsLink(addresses: any[], mode: string): string {
         </template>
 
         <!-- Step 2: Choose start mode -->
-        <template
-          v-else-if="!selection_state.startModeChosen"
-        >
+        <template v-else-if="!selection_state.startModeChosen">
           <h2>Choose Start Location</h2>
-
           <hr />
-
           <p>Select how you’d like to set your starting point.</p>
-          <div class="d-flex gap-3 mt-3">
+          <div class="d-flex gap-3 mt-3 flex-wrap">
             <button class="btn btn-primary btn-sm" @click="chooseCurrent">
               Use Current Location
             </button>
@@ -291,12 +381,10 @@ function appleMapsLink(addresses: any[], mode: string): string {
           </div>
         </template>
 
-        <!-- Step 3: Address entry -->
+        <!-- Step 3: Address entry + priorities -->
         <template v-else-if="!selection_state.addressSelectionCompleted">
           <h2>Addresses</h2>
-          <h5>
-            Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses
-          </h5>
+          <h5>Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses</h5>
 
           <Draggable
             v-model="selection_state.selectedAddresses"
@@ -310,16 +398,46 @@ function appleMapsLink(addresses: any[], mode: string): string {
             :delay-on-touch-only="true"
           >
             <template #item="{ element, index }">
-              <li class="d-flex align-items-center gap-2 py-1">
+              <li class="d-flex align-items-center gap-2 py-1 flex-wrap">
                 <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
-                <div class="d-flex flex-column">
+                <div class="d-flex flex-column me-2">
                   <strong class="stop-name">
                     {{ element.name || element.formatted_address }}
                   </strong>
                 </div>
+
+                <!-- Finish pin -->
+                <button
+                  class="btn btn-outline-secondary btn-sm"
+                  :class="{ 'btn-success': finishUid === element.uid }"
+                  @click="toggleFinish(element.uid)"
+                  title="Set this stop as fixed finish"
+                >
+                  {{ finishUid === element.uid ? "Pinned Finish" : "Set as Finish" }}
+                </button>
+
+                <!-- Priority selector: 'this stop must come before -> X' -->
+                <div class="d-flex align-items-center gap-1">
+                  <small>Must come before:</small>
+                  <select
+                    class="form-select form-select-sm"
+                    :value="currentAfterFor(element.uid)"
+                    @change="(e:any)=>setMustComeBefore(element.uid, e.target.value)"
+                  >
+                    <option value="">No priority</option>
+                    <option
+                      v-for="other in selection_state.selectedAddresses.filter(s => s.uid !== element.uid)"
+                      :key="other.uid"
+                      :value="other.uid"
+                    >
+                      {{ other.name || other.formatted_address }}
+                    </option>
+                  </select>
+                </div>
+
                 <button
                   v-if="!element?.isCurrentLocation"
-                  class="btn btn-danger btn-sm ms-2"
+                  class="btn btn-danger btn-sm ms-auto"
                   @click="removeSelectedAddress(index)"
                 >
                   Remove
@@ -340,7 +458,7 @@ function appleMapsLink(addresses: any[], mode: string): string {
             />
           </div>
 
-          <div class="d-flex gap-2 mt-3">
+          <div class="d-flex gap-2 mt-3 flex-wrap">
             <button
               class="btn btn-secondary btn-sm"
               @click="previewRoute"
@@ -361,6 +479,7 @@ function appleMapsLink(addresses: any[], mode: string): string {
         <!-- Step 4: Preview/Optimize -->
         <template v-else>
           <h2>Route</h2>
+
           <div class="mb-3">
             <label class="form-label">Mode</label>
             <select
@@ -368,11 +487,7 @@ function appleMapsLink(addresses: any[], mode: string): string {
               :value="selection_state.travelMode"
               @change="(e:any)=>selection_state.travelMode = e.target.value"
             >
-              <option
-                v-for="m in availableTransportationMethods"
-                :key="m"
-                :value="m"
-              >
+              <option v-for="m in availableTransportationMethods" :key="m" :value="m">
                 {{ m }}
               </option>
             </select>
@@ -388,10 +503,7 @@ function appleMapsLink(addresses: any[], mode: string): string {
             :travelMode="selection_state.travelMode"
           />
 
-          <div
-            class="text-center mt-3"
-            v-if="selection_state.optimumRouteAddressOrder === LOADING"
-          >
+          <div class="text-center mt-3" v-if="selection_state.optimumRouteAddressOrder === LOADING">
             Calculating optimum route…
           </div>
 
@@ -400,12 +512,10 @@ function appleMapsLink(addresses: any[], mode: string): string {
           </p>
 
           <div class="d-flex flex-wrap gap-2 mt-3">
-            <button
-              class="btn btn-outline-secondary btn-sm"
-              @click="previewRoute"
-            >
-              Show entered order
+            <button class="btn btn-outline-secondary btn-sm" @click="selection_state.addressSelectionCompleted = false">
+              Back to edit
             </button>
+
             <button class="btn btn-primary btn-sm" @click="optimizeRoute">
               Optimize order
             </button>
@@ -459,7 +569,6 @@ function appleMapsLink(addresses: any[], mode: string): string {
   border-radius: 6px;
   background: var(--card);
   color: var(--text);
-  
 }
 .drag-handle:hover { cursor: grab; }
 .drag-ghost {
@@ -471,13 +580,9 @@ function appleMapsLink(addresses: any[], mode: string): string {
   color: var(--text);
   font-weight: 600;
 }
-
 .stop-address {
   font-size: 0.85em;
   color: var(--text);
   opacity: 0.7;
 }
-
-
 </style>
-
