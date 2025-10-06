@@ -1,80 +1,142 @@
-/* Light Mode (default) */
+/* ===== THEME TOKENS ===== */
 :root {
   --bg: #ffffff;
-  --text: #213547;
+  --text: #1a1a1a;
+  --muted: #6b7280;
   --card: #f6f7f9;
   --border: #e5e7eb;
-  --accent: #646cff;
+  --accent: #22c55e; /* green hint */
 
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* navbar */
+  --navbar-bg: #ffffff;
+  --navbar-border: #e5e7eb;
 }
 
-/* Dark Mode */
 :root[data-theme="dark"] {
-  --bg: #242424;
-  --text: rgba(255,255,255,0.87);
-  --card: #1a1a1a;
-  --border: #3b3b3b;
-  --accent: #747bff;
+  --bg: #0f1113;
+  --text: #f2f4f7;
+  --muted: #9aa3b2;
+  --card: #15181c;
+  --border: #2b2f36;
+  --accent: #34d399;
+
+  /* navbar */
+  --navbar-bg: #111315;
+  --navbar-border: #2b2f36;
 }
 
-/* --- BASE USING TOKENS --- */
+/* ===== GLOBAL BASE ===== */
 html, body, #app {
   background: var(--bg);
   color: var(--text);
   transition: background-color .2s ease, color .2s ease, border-color .2s ease;
+  min-height: 100%;
 }
-
-a {
-  font-weight: 500;
-  color: var(--accent);
-  text-decoration: inherit;
-}
-a:hover { text-decoration: underline; }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
 }
 
-h1 { font-size: 3.2em; line-height: 1.1; }
+/* Links */
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
 
-button {
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: var(--card);
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover { border-color: var(--accent); }
-button:focus,
-button:focus-visible { outline: 4px auto -webkit-focus-ring-color; }
-
+/* Generic card */
 .card {
-  padding: 2em;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 12px;
 }
 
+/* Center the app content on wide screens */
 #app {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  padding: 1rem 1.25rem 2rem;
+}
+
+/* ===== BOOTSTRAP TWEAKS TO RESPECT THEME ===== */
+.btn {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+}
+.btn:hover { border-color: var(--accent); }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0f0c;
+}
+.btn-primary:hover { filter: brightness(1.05); }
+
+.form-control,
+.form-select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 .2rem color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.text-muted { color: var(--muted) !important; }
+
+/* ===== NAVBAR (your existing classes) ===== */
+nav.app-nav {
+  width: 100%;
+  max-width: 1200px;
+  margin: 1rem auto;
+  padding: 0.75rem 1.5rem;
+  background: var(--navbar-bg);
+  border: 1px solid var(--navbar-border);
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 1rem;
+  z-index: 1000;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+  transition: background-color 0.3s ease, border-color 0.3s ease;
+}
+
+.nav-left { display: flex; align-items: center; gap: 12px; }
+.nav-logo { height: 40px; width: auto; object-fit: contain; }
+.nav-title { font-weight: 700; font-size: 1.25rem; color: var(--text); }
+
+.nav-actions { display: flex; align-items: center; gap: 0.75rem; }
+.nav-btn {
+  border: 1.5px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  padding: 0.45rem 1.1rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all .25s ease;
+}
+.nav-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* ===== MOBILE ===== */
+@media (max-width: 768px) {
+  nav.app-nav {
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.9rem 1.25rem;
+    border-radius: 20px;
+  }
+  .nav-left { justify-content: center; }
+  .nav-actions { width: 100%; justify-content: center; flex-wrap: wrap; gap: .5rem; }
+  .nav-title { font-size: 1.1rem; }
+  .nav-logo { height: 32px; }
 }

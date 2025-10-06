@@ -29,9 +29,24 @@ const canProceed = computed(
   () => selection_state.value.selectedAddresses.length >= 2
 );
 
-// NEW: simple constraints state (UI -> algo)
 const prereqsByUid = ref<Record<string, string[]>>({}); // afterUid -> [beforeUid,...]
 const finishUid = ref<string | null>(null);
+
+const editingIndex = ref<number | null>(null)
+
+function startEdit(i: number) {
+  editingIndex.value = i
+}
+
+function cancelEdit() {
+  editingIndex.value = null
+}
+
+function saveEditedAddress(newAddress: any, index: number) {
+  selection_state.value.selectedAddresses[index] = withUid(newAddress)
+  selection_state.value.optimumRouteAddressOrder = null  // reset any prior result
+  editingIndex.value = null
+}
 
 // ---------- helpers ----------
 function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
@@ -163,11 +178,9 @@ function normalizeForMatrix(a: any): string | google.maps.LatLngLiteral {
 }
 
 function buildConstraintIndexes(stops: any[]) {
-  // map uids to indexes
   const idOf: Record<string, number> = {};
   stops.forEach((s, i) => (idOf[s.uid] = i));
 
-  // convert UI prereqsByUid (afterUid -> [beforeUid]) into index mapping
   const prerequisites: Record<number, number[]> = {};
   for (const [afterUid, befores] of Object.entries(prereqsByUid.value)) {
     if (!(afterUid in idOf)) continue;
@@ -177,7 +190,6 @@ function buildConstraintIndexes(stops: any[]) {
     }
   }
 
-  // endIndex from finishUid
   const endIndex =
     finishUid.value && finishUid.value in idOf
       ? idOf[finishUid.value]
@@ -291,7 +303,7 @@ function googleMapsLink(addresses: any[], mode: string): string {
 }
 
 function appleDirFlag(mode: string) {
-  return mode === "Walking" ? "w" : "d"; // Apple has no bike flag; default to driving
+  return mode === "Walking" ? "w" : "d";
 }
 function appleMapsLink(addresses: any[], mode: string): string {
   if (!addresses || addresses.length < 2) return "#";
@@ -325,7 +337,6 @@ function toggleFinish(uid: string) {
 }
 
 function currentAfterFor(beforeUid: string): string {
-  // find any "after" that lists this uid as a prerequisite
   for (const [after, befores] of Object.entries(prereqsByUid.value)) {
     if ((befores || []).includes(beforeUid)) return after;
   }
@@ -333,14 +344,12 @@ function currentAfterFor(beforeUid: string): string {
 }
 
 function setMustComeBefore(beforeUid: string, afterUid: string) {
-  // clear previous association for this "before"
   for (const k of Object.keys(prereqsByUid.value)) {
     prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(
       (u) => u !== beforeUid
     );
     if (!prereqsByUid.value[k].length) delete prereqsByUid.value[k];
   }
-  // set new association if any
   if (afterUid) {
     const arr = prereqsByUid.value[afterUid] || [];
     if (!arr.includes(beforeUid)) arr.push(beforeUid);
@@ -354,7 +363,6 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
   <div class="container mt-4">
     <div class="row justify-content-center">
       <div class="col-12 col-lg-8">
-        <!-- Step 1: Welcome -->
         <template v-if="!selection_state.welcomeAcknowledged">
           <h2>Welcome to OptiPath</h2>
           <p>{{ WELCOME_MESSAGE }}</p>
@@ -366,7 +374,6 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
           </button>
         </template>
 
-        <!-- Step 2: Choose start mode -->
         <template v-else-if="!selection_state.startModeChosen">
           <h2>Choose Start Location</h2>
           <hr />
@@ -381,7 +388,6 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
           </div>
         </template>
 
-        <!-- Step 3: Address entry + priorities -->
         <template v-else-if="!selection_state.addressSelectionCompleted">
           <h2>Addresses</h2>
           <h5>Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses</h5>
@@ -400,13 +406,13 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
             <template #item="{ element, index }">
               <li class="d-flex align-items-center gap-2 py-1 flex-wrap">
                 <span class="drag-handle" title="Drag to reorder">⋮⋮</span>
+
                 <div class="d-flex flex-column me-2">
                   <strong class="stop-name">
                     {{ element.name || element.formatted_address }}
                   </strong>
                 </div>
 
-                <!-- Finish pin -->
                 <button
                   class="btn btn-outline-secondary btn-sm"
                   :class="{ 'btn-success': finishUid === element.uid }"
@@ -416,7 +422,6 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
                   {{ finishUid === element.uid ? "Pinned Finish" : "Set as Finish" }}
                 </button>
 
-                <!-- Priority selector: 'this stop must come before -> X' -->
                 <div class="d-flex align-items-center gap-1">
                   <small>Must come before:</small>
                   <select
@@ -435,14 +440,33 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
                   </select>
                 </div>
 
-                <button
-                  v-if="!element?.isCurrentLocation"
-                  class="btn btn-danger btn-sm ms-auto"
-                  @click="removeSelectedAddress(index)"
-                >
-                  Remove
-                </button>
+                <div class="ms-auto d-flex gap-2">
+                  <button
+                    class="btn btn-outline-primary btn-sm"
+                    @click="startEdit(index)"
+                  >
+                    Edit
+                  </button>
+
+                  <button
+                    v-if="!element?.isCurrentLocation"
+                    class="btn btn-danger btn-sm"
+                    @click="removeSelectedAddress(index)"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                <div v-if="editingIndex === index" class="w-100 mt-2">
+                  <AddressComponent
+                    @addressSelected="(addr:any) => saveEditedAddress(addr, index)"
+                  />
+                  <div class="mt-2">
+                    <button class="btn btn-secondary btn-sm" @click="cancelEdit">Cancel</button>
+                  </div>
+                </div>
               </li>
+
             </template>
           </Draggable>
 
