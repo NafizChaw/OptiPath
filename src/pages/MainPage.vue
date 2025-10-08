@@ -10,6 +10,7 @@ import MapComponent from "../components/MapComponent.vue";
 import type { SelectionState } from "../interfaces";
 import { computeBestRoute, suggestBestDeparture } from "../algo/computeBestRoute";
 import Draggable from "vuedraggable";
+import LLMChat from "../components/LLMChat.vue"; // ✅ AI Chat
 
 // ---------- state ----------
 const selection_state = ref<SelectionState>({
@@ -31,21 +32,14 @@ const canProceed = computed(
 
 const prereqsByUid = ref<Record<string, string[]>>({}); // afterUid -> [beforeUid,...]
 const finishUid = ref<string | null>(null);
+const editingIndex = ref<number | null>(null);
 
-const editingIndex = ref<number | null>(null)
-
-function startEdit(i: number) {
-  editingIndex.value = i
-}
-
-function cancelEdit() {
-  editingIndex.value = null
-}
-
+function startEdit(i: number) { editingIndex.value = i; }
+function cancelEdit() { editingIndex.value = null; }
 function saveEditedAddress(newAddress: any, index: number) {
-  selection_state.value.selectedAddresses[index] = withUid(newAddress)
-  selection_state.value.optimumRouteAddressOrder = null  // reset any prior result
-  editingIndex.value = null
+  selection_state.value.selectedAddresses[index] = withUid(newAddress);
+  selection_state.value.optimumRouteAddressOrder = null;
+  editingIndex.value = null;
 }
 
 // ---------- helpers ----------
@@ -57,6 +51,64 @@ function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
   return { ...obj, uid };
 }
 
+// ✅ Gemini chat payload handler
+function addFromLLM(payload: {
+  origin: any, stops: any[], finish?: any, constraints?: Array<[number, number]>
+}) {
+  const withUidWrap = (o: any) => withUid(o);
+
+  // Origin
+  const idxCur = selection_state.value.selectedAddresses.findIndex(a => a?.isCurrentLocation);
+  if (payload.origin?.isCurrentLocation) {
+    if (idxCur === -1) {
+      selection_state.value.selectedAddresses.unshift(withUidWrap(payload.origin));
+      selection_state.value.startIndex = 0;
+    } else {
+      const existing = selection_state.value.selectedAddresses[idxCur];
+      selection_state.value.selectedAddresses[idxCur] = {
+        ...payload.origin,
+        uid: existing?.uid ?? withUidWrap(payload.origin).uid
+      };
+      selection_state.value.startIndex = idxCur;
+    }
+  } else if (payload.origin) {
+    selection_state.value.selectedAddresses.unshift(withUidWrap(payload.origin));
+    selection_state.value.startIndex = 0;
+  }
+
+  // Stops
+  const baseIndex = selection_state.value.selectedAddresses.length;
+  for (const s of payload.stops) selection_state.value.selectedAddresses.push(withUidWrap(s));
+
+  // Finish (pin it)
+  if (payload.finish) {
+    const f = withUidWrap(payload.finish);
+    selection_state.value.selectedAddresses.push(f);
+    finishUid.value = f.uid;
+  }
+
+  // Constraints → prereqsByUid
+  if (payload.constraints?.length) {
+    const added = selection_state.value.selectedAddresses.slice(baseIndex);
+    const toUid = (localIdx: number) => added[localIdx]?.uid;
+    for (const [beforeLocal, afterLocal] of payload.constraints) {
+      const bUid = toUid(beforeLocal), aUid = toUid(afterLocal);
+      if (!bUid || !aUid) continue;
+      for (const k of Object.keys(prereqsByUid.value)) {
+        prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(u => u !== bUid);
+        if (!prereqsByUid.value[k].length) delete prereqsByUid.value[k];
+      }
+      const arr = prereqsByUid.value[aUid] || [];
+      if (!arr.includes(bUid)) arr.push(bUid);
+      prereqsByUid.value[aUid] = arr;
+    }
+  }
+
+  selection_state.value.optimumRouteAddressOrder = null;
+  selection_state.value.addressSelectionCompleted = true;
+  // await optimizeRoute(); // uncomment for immediate optimization
+}
+
 const handleAddressSelected = (newAddress: any, index: number) => {
   selection_state.value.selectedAddresses[index] = withUid(newAddress);
   selection_state.value.optimumRouteAddressOrder = null;
@@ -65,31 +117,23 @@ const handleAddressSelected = (newAddress: any, index: number) => {
 const removeSelectedAddress = (index: number) => {
   const removed = selection_state.value.selectedAddresses.splice(index, 1)[0];
 
-  // clean constraints referencing removed stop
   if (removed?.uid) {
-    // remove as "finish"
     if (finishUid.value === removed.uid) finishUid.value = null;
-    // remove from all prereq arrays
     for (const k of Object.keys(prereqsByUid.value)) {
       prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(
         (u) => u !== removed.uid
       );
       if (!prereqsByUid.value[k].length) delete prereqsByUid.value[k];
     }
-    // remove key if it existed
     delete prereqsByUid.value[removed.uid];
   }
 
-  if (selection_state.value.startIndex > index) {
-    selection_state.value.startIndex--;
-  }
+  if (selection_state.value.startIndex > index) selection_state.value.startIndex--;
   selection_state.value.optimumRouteAddressOrder = null;
 };
 
 async function onReordered() {
   selection_state.value.optimumRouteAddressOrder = null;
-  // optional: auto re-optimize on drag end
-  // await optimizeRoute();
 }
 
 async function useCurrentLocationAsOrigin() {
@@ -97,8 +141,7 @@ async function useCurrentLocationAsOrigin() {
     const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
       if (!navigator.geolocation) return reject(new Error("No geolocation"));
       navigator.geolocation.getCurrentPosition(
-        resolve,
-        reject,
+        resolve, reject,
         { enableHighAccuracy: true, timeout: 10000 }
       );
     });
@@ -109,10 +152,7 @@ async function useCurrentLocationAsOrigin() {
       latLng: { lat: pos.coords.latitude, lng: pos.coords.longitude },
     });
 
-    const idx = selection_state.value.selectedAddresses.findIndex(
-      (a) => a?.isCurrentLocation
-    );
-
+    const idx = selection_state.value.selectedAddresses.findIndex(a => a?.isCurrentLocation);
     if (idx === -1) {
       selection_state.value.selectedAddresses.unshift(myLoc);
       selection_state.value.startIndex = 0;
@@ -162,12 +202,9 @@ const previewRoute = () => {
 
 function toGMode(mode: string): google.maps.TravelMode {
   switch (mode) {
-    case "Walking":
-      return google.maps.TravelMode.WALKING;
-    case "Bicycling":
-      return google.maps.TravelMode.BICYCLING;
-    default:
-      return google.maps.TravelMode.DRIVING;
+    case "Walking":   return google.maps.TravelMode.WALKING;
+    case "Bicycling": return google.maps.TravelMode.BICYCLING;
+    default:          return google.maps.TravelMode.DRIVING;
   }
 }
 
@@ -203,8 +240,7 @@ async function ensureGoogleLoaded(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const s = document.createElement("script");
     s.src = `https://maps.googleapis.com/maps/api/js?key=${import.meta.env.VITE_GOOGLE_MAPS_API_KEY}&libraries=places`;
-    s.async = true;
-    s.defer = true;
+    s.async = true; s.defer = true;
     s.onload = () => resolve();
     s.onerror = () => reject(new Error("Failed to load Google Maps JS"));
     document.head.appendChild(s);
@@ -236,7 +272,7 @@ const optimizeRoute = async () => {
 
     selection_state.value.optimumRouteAddressOrder = order.map((i) => stops[i]);
 
-    // small “leave later” hint sweep (keep light for quota)
+    // small departure sweep
     try {
       const hint = await suggestBestDeparture(addresses as any, mode, [0, 15, 30], {
         startIndex: selection_state.value.startIndex ?? 0,
@@ -246,18 +282,14 @@ const optimizeRoute = async () => {
       });
       bestDepartureHint.value =
         hint.bestOffsetMin > 0
-          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(
-              hint.bestSeconds / 60
-            )} min total).`
+          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(hint.bestSeconds / 60)} min total).`
           : `Leaving now is best (≈ ${Math.round(hint.bestSeconds / 60)} min total).`;
     } catch {
       bestDepartureHint.value = null;
     }
   } catch (e) {
     console.error(e);
-    alert(
-      "Optimization failed. Make sure Google Maps JS & Distance Matrix are enabled (with billing) and any ad blockers are disabled for this site."
-    );
+    alert("Optimization failed. Check Google Maps JS & Distance Matrix (with billing) and disable ad blockers for this site.");
     selection_state.value.optimumRouteAddressOrder = null;
   }
 };
@@ -302,9 +334,7 @@ function googleMapsLink(addresses: any[], mode: string): string {
   return `${base}&${parts.join("&")}`;
 }
 
-function appleDirFlag(mode: string) {
-  return mode === "Walking" ? "w" : "d";
-}
+function appleDirFlag(mode: string) { return mode === "Walking" ? "w" : "d"; }
 function appleMapsLink(addresses: any[], mode: string): string {
   if (!addresses || addresses.length < 2) return "#";
   const base = "https://maps.apple.com/";
@@ -335,14 +365,12 @@ function toggleFinish(uid: string) {
   finishUid.value = finishUid.value === uid ? null : uid;
   selection_state.value.optimumRouteAddressOrder = null;
 }
-
 function currentAfterFor(beforeUid: string): string {
   for (const [after, befores] of Object.entries(prereqsByUid.value)) {
     if ((befores || []).includes(beforeUid)) return after;
   }
   return "";
 }
-
 function setMustComeBefore(beforeUid: string, afterUid: string) {
   for (const k of Object.keys(prereqsByUid.value)) {
     prereqsByUid.value[k] = (prereqsByUid.value[k] || []).filter(
@@ -366,10 +394,7 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
         <template v-if="!selection_state.welcomeAcknowledged">
           <h2>Welcome to OptiPath</h2>
           <p>{{ WELCOME_MESSAGE }}</p>
-          <button
-            class="btn btn-primary btn-sm mt-3"
-            @click="selection_state.welcomeAcknowledged = true"
-          >
+          <button class="btn btn-primary btn-sm mt-3" @click="selection_state.welcomeAcknowledged = true">
             GET STARTED
           </button>
         </template>
@@ -379,18 +404,18 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
           <hr />
           <p>Select how you’d like to set your starting point.</p>
           <div class="d-flex gap-3 mt-3 flex-wrap">
-            <button class="btn btn-primary btn-sm" @click="chooseCurrent">
-              Use Current Location
-            </button>
-            <button class="btn btn-secondary btn-sm" @click="chooseDifferent">
-              Use Different Location
-            </button>
+            <button class="btn btn-primary btn-sm" @click="chooseCurrent">Use Current Location</button>
+            <button class="btn btn-secondary btn-sm" @click="chooseDifferent">Use Different Location</button>
           </div>
         </template>
 
+        <!-- 📍 Addresses step -->
         <template v-else-if="!selection_state.addressSelectionCompleted">
           <h2>Addresses</h2>
           <h5>Select at least 2 and up to {{ MAX_SELECTABLE_ADDRESSES }} addresses</h5>
+
+          <!-- 🧠 AI Chat (Gemini) -->
+          <LLMChat @resolvedStops="addFromLLM" />
 
           <Draggable
             v-model="selection_state.selectedAddresses"
@@ -441,13 +466,7 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
                 </div>
 
                 <div class="ms-auto d-flex gap-2">
-                  <button
-                    class="btn btn-outline-primary btn-sm"
-                    @click="startEdit(index)"
-                  >
-                    Edit
-                  </button>
-
+                  <button class="btn btn-outline-primary btn-sm" @click="startEdit(index)">Edit</button>
                   <button
                     v-if="!element?.isCurrentLocation"
                     class="btn btn-danger btn-sm"
@@ -458,15 +477,12 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
                 </div>
 
                 <div v-if="editingIndex === index" class="w-100 mt-2">
-                  <AddressComponent
-                    @addressSelected="(addr:any) => saveEditedAddress(addr, index)"
-                  />
+                  <AddressComponent @addressSelected="(addr:any) => saveEditedAddress(addr, index)" />
                   <div class="mt-2">
                     <button class="btn btn-secondary btn-sm" @click="cancelEdit">Cancel</button>
                   </div>
                 </div>
               </li>
-
             </template>
           </Draggable>
 
@@ -483,11 +499,7 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
           </div>
 
           <div class="d-flex gap-2 mt-3 flex-wrap">
-            <button
-              class="btn btn-secondary btn-sm"
-              @click="previewRoute"
-              :disabled="!canProceed"
-            >
+            <button class="btn btn-secondary btn-sm" @click="previewRoute" :disabled="!canProceed">
               Preview route
             </button>
             <button
@@ -500,7 +512,7 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
           </div>
         </template>
 
-        <!-- Step 4: Preview/Optimize -->
+        <!-- 🗺️ Route / Optimize -->
         <template v-else>
           <h2>Route</h2>
 
@@ -600,13 +612,6 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
   background: var(--card);
   border: 1px dashed var(--border);
 }
-.stop-name {
-  color: var(--text);
-  font-weight: 600;
-}
-.stop-address {
-  font-size: 0.85em;
-  color: var(--text);
-  opacity: 0.7;
-}
+.stop-name { color: var(--text); font-weight: 600; }
+.stop-address { font-size: 0.85em; color: var(--text); opacity: 0.7; }
 </style>
