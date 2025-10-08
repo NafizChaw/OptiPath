@@ -5,12 +5,8 @@
       Try: <em>“from my home go to Walmart then Target, pick up cat litter at a pet store, end at 123 Main St”</em>
     </div>
 
-    <textarea
-      v-model="input"
-      class="form-control"
-      rows="3"
-      placeholder="Tell me your route in plain English…"
-    ></textarea>
+    <textarea v-model="input" class="form-control" rows="3"
+      placeholder="Tell me your route in plain English…"></textarea>
 
     <div class="d-flex gap-2 mt-2">
       <button class="btn btn-primary btn-sm" :disabled="loading" @click="submit">
@@ -43,38 +39,6 @@ const input = ref("");
 const loading = ref(false);
 const debugPlan = ref<string | null>(null);
 
-/**
- * Where to call the API:
- * - Dev:  http://localhost:5175 (vite server proxies /api -> 5175 if you set it)
- * - Prod: same-origin (Vercel serverless under /api)
- * You can override with VITE_API_BASE if you want.
- */
-const API_BASE =
-  (import.meta.env.VITE_API_BASE?.toString().trim() || "") ||
-  (typeof window !== "undefined" && window.location.hostname === "localhost"
-    ? "http://localhost:5175"
-    : "");
-
-/** Robust JSON fetch that detects HTML (404 pages) */
-async function fetchJson(url: string, init?: RequestInit) {
-  const r = await fetch(url, init);
-  const ct = r.headers.get("content-type") || "";
-  const text = await r.text();
-
-  // Non-JSON (likely HTML 404) → throw a clearer error
-  if (!ct.includes("application/json")) {
-    throw new Error(
-      `Unexpected non-JSON response from ${url}.` +
-      (text?.slice(0, 80) ? ` Snippet: ${text.slice(0, 80)}…` : "")
-    );
-  }
-  const data = JSON.parse(text);
-  if (!r.ok) {
-    throw new Error(data?.error || `HTTP ${r.status}`);
-  }
-  return data;
-}
-
 function setHome() {
   const cur = localStorage.getItem("optipath_home_addr") || "";
   const next = prompt("Enter your Home address (or coordinates):", cur);
@@ -91,14 +55,12 @@ async function submit() {
     await ensureGoogleLoaded();
 
     // 1) Parse itinerary with Gemini (our backend)
-    //    DEV:  http://localhost:5175/api/parse-itinerary
-    //    PROD: /api/parse-itinerary
-    const data = await fetchJson(`${API_BASE}/api/parse-itinerary`, {
+    const res = await fetch("/chat/parse-itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: input.value })
     });
-
+    const data = await res.json();
     if (!data?.ok) throw new Error(data?.error || "LLM parse failed");
 
     const plan = data.plan as {
@@ -146,7 +108,7 @@ async function submit() {
     });
   } catch (e: any) {
     console.error(e);
-    alert(e?.message || "Sorry—couldn’t process that request.");
+    alert(e.message || "Sorry—couldn’t process that request.");
   } finally {
     loading.value = false;
   }
