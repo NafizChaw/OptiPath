@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import {
   MAX_SELECTABLE_ADDRESSES,
   WELCOME_MESSAGE,
@@ -7,6 +7,7 @@ import {
 } from "../constants";
 import AddressComponent from "../components/AddressComponent.vue";
 import MapComponent from "../components/MapComponent.vue";
+import CategorySearch from "../components/CategorySearch.vue";
 import type { SelectionState } from "../interfaces";
 import { computeBestRoute, suggestBestDeparture } from "../algo/computeBestRoute";
 import Draggable from "vuedraggable";
@@ -49,6 +50,44 @@ function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
     (globalThis.crypto as any)?.randomUUID?.() ||
     String(Date.now() + Math.random());
   return { ...obj, uid };
+}
+
+// --- Category Search wiring ---
+// Where to bias searches (current location if available; else geolocate once)
+const searchCenter = ref<{ lat: number; lng: number } | null>(null);
+
+function refreshSearchCenterFromStops() {
+  const cur = selection_state.value.selectedAddresses.find(a => a?.latLng);
+  if (cur?.latLng) searchCenter.value = cur.latLng;
+}
+refreshSearchCenterFromStops();
+
+async function ensureCenter() {
+  if (searchCenter.value) return;
+  try {
+    const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation
+        ? navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000 })
+        : reject(new Error("Geolocation not supported"));
+    });
+    searchCenter.value = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+  } catch { /* ignore if user blocks geo; Text Search will still work */ }
+}
+ensureCenter();
+
+// keep center synced when user adds/removes stops (e.g., current location)
+watch(() => selection_state.value.selectedAddresses, refreshSearchCenterFromStops, { deep: true });
+
+function handleCategorySelected(place: any) {
+  const lat = place?.latLng?.lat ?? place?.geometry?.location?.lat?.();
+  const lng = place?.latLng?.lng ?? place?.geometry?.location?.lng?.();
+  const normalized = {
+    formatted_address: place.formatted_address || place.name,
+    name: place.name,
+    ...(lat != null && lng != null ? { latLng: { lat, lng } } : {})
+  };
+  selection_state.value.selectedAddresses.push(normalized);
+  // Optional: auto-scroll list into view or flash a toast here
 }
 
 // ✅ Gemini chat payload handler
@@ -495,6 +534,17 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
             <label class="form-label">Add an address</label>
             <AddressComponent
               @addressSelected="handleAddressSelected($event, selection_state.selectedAddresses.length)"
+            />
+          </div>
+
+          <!-- Category search (scrolling list with ratings) -->
+          <div class="mt-3">
+            <label class="form-label">Search by category</label>
+            <CategorySearch
+              :center="searchCenter"
+              :radiusMeters="5000"
+              placeholder="e.g., gas station, grocery store, pharmacy…"
+              @select="handleCategorySelected"
             />
           </div>
 
