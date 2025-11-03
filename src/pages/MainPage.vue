@@ -301,12 +301,15 @@ const optimizeRoute = async () => {
 
     const { prerequisites, endIndex } = buildConstraintIndexes(stops);
 
+    const strategy = selection_state.value.routeOption; 
+
     const { order } = await computeBestRoute(addresses as any, mode, {
       startIndex: selection_state.value.startIndex ?? 0,
       returnToStart: false,
       departureTime: new Date(),
       prerequisites,
       endIndex,
+      strategy,
     });
 
     selection_state.value.optimumRouteAddressOrder = order.map((i) => stops[i]);
@@ -321,8 +324,8 @@ const optimizeRoute = async () => {
       });
       bestDepartureHint.value =
         hint.bestOffsetMin > 0
-          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(hint.bestSeconds / 60)} min total).`
-          : `Leaving now is best (≈ ${Math.round(hint.bestSeconds / 60)} min total).`;
+          ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster.`
+          : `Leaving now is best.`;
     } catch {
       bestDepartureHint.value = null;
     }
@@ -542,6 +545,9 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
             <label class="form-label">Search by category</label>
             <CategorySearch
               :center="searchCenter"
+              :lastPoint="selection_state.selectedAddresses.length
+                ? selection_state.selectedAddresses[selection_state.selectedAddresses.length - 1].latLng
+                : searchCenter"
               :radiusMeters="5000"
               placeholder="e.g., gas station, grocery store, pharmacy…"
               @select="handleCategorySelected"
@@ -579,6 +585,18 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
             </select>
           </div>
 
+          <!-- Route preference selector -->
+          <div class="mb-3">
+            <label class="form-label">Route Preference</label>
+            <select class="form-select"
+                  :value="selection_state.routeOption"
+                  @change="(e:any)=>selection_state.routeOption = e.target.value">
+              <option value="Fastest">Fastest</option>
+              <option value="Shortest Distance">Shortest Distance</option>
+              <option value="Least Turns">Least Turns</option>
+            </select>
+          </div> 
+
           <MapComponent
             :addresses="
               selection_state.optimumRouteAddressOrder &&
@@ -587,6 +605,7 @@ function setMustComeBefore(beforeUid: string, afterUid: string) {
                 : selection_state.selectedAddresses
             "
             :travelMode="selection_state.travelMode"
+            :strategy="selection_state.routeOption"
           />
 
           <div class="text-center mt-3" v-if="selection_state.optimumRouteAddressOrder === LOADING">

@@ -11,10 +11,15 @@ export type MatrixOptions = {
   unitSystem?: google.maps.UnitSystem;
 };
 
+export type MatrixResult = {
+  timeSeconds: number[][];
+  distanceMeters: number[][];
+};
+
 export async function getTimeMatrix(
   addresses: OriginDest[],
   opts: MatrixOptions
-): Promise<TimeMatrix> {
+): Promise<MatrixResult> {
   const svc = new google.maps.DistanceMatrixService();
 
   const resp = await new Promise<google.maps.DistanceMatrixResponse>((resolve, reject) => {
@@ -36,14 +41,22 @@ export async function getTimeMatrix(
   });
 
   const n = addresses.length;
-  const mat: TimeMatrix = Array.from({ length: n }, () => Array(n).fill(Infinity));
+  const timeSeconds: number[][]    = Array.from({ length: n }, () => Array(n).fill(Infinity));
+  const distanceMeters: number[][] = Array.from({ length: n }, () => Array(n).fill(Infinity));
 
   resp.rows.forEach((row, i) => {
     row.elements.forEach((el, j) => {
-      mat[i][j] = (el.status === "OK" && el.duration) ? el.duration.value : Infinity;
+      if (el.status === "OK") {
+        if (el.duration?.value != null) timeSeconds[i][j] = el.duration.value;
+        if (el.distance?.value != null) distanceMeters[i][j] = el.distance.value;
+      }
     });
   });
 
-  for (let i = 0; i < n; i++) mat[i][i] = 0;
-  return mat;
+  for (let i = 0; i < n; i++) {
+    timeSeconds[i][i] = 0;
+    distanceMeters[i][i] = 0;
+  }
+
+  return { timeSeconds, distanceMeters };
 }

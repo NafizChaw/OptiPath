@@ -52,6 +52,30 @@ const TYPE_ALIASES: Record<string, string> = {
   'parking': 'parking'
 };
 
+function distanceMiles(a: LatLng | null | undefined, b: LatLng | null | undefined): number | null {
+  if (!a || !b) return null;
+  const R = 6371_000; // meters (Earth radius)
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+
+  const h =
+    sinLat * sinLat +
+    Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+
+  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  const meters = R * c;
+  const miles = meters / 1609.344;
+  return miles;
+}
+
 async function search() {
   results.value = [];
   nextPageFn.value = null;
@@ -123,11 +147,29 @@ function add(place: PlaceLite) {
     ...(lat != null && lng != null ? { latLng: { lat, lng } } : {})
   });
 }
+
+function distanceLabelFor(place: PlaceLite): string | null {
+  const plat = place.geometry?.location?.lat();
+  const plng = place.geometry?.location?.lng();
+  if (plat == null || plng == null) return null;
+
+  const d = distanceMiles(
+    props.lastPoint ?? props.center ?? null,
+    { lat: plat, lng: plng }
+  );
+  if (d == null) return null;
+
+  return `${d.toFixed(1)} mi`;
+}
+
+function gasPriceLabel(place: PlaceLite): string | null {
+  if (!query.value.toLowerCase().includes('gas')) return null;
+  return "Gas price: N/A";
+}
 </script>
 
 <template>
   <div class="category-search">
-    <!-- Show/hide label with prop -->
     <label v-if="showLabel !== false" class="form-label">Search by category</label>
 
     <div class="d-flex gap-2">
@@ -150,11 +192,16 @@ function add(place: PlaceLite) {
           <div class="title">{{ r.name }}</div>
           <div class="addr text-muted small">{{ r.formatted_address }}</div>
 
-          <!-- TRUE partial stars (half-stars etc.) -->
+          <!-- rating row -->
           <div class="rating small" v-if="r.rating !== undefined">
             <span class="stars" :style="{ '--value': r.rating }"></span>
             <span class="ms-1">{{ r.rating.toFixed(1) }}</span>
-            <span v-if="r.user_ratings_total"> ({{ r.user_ratings_total }})</span>
+          </div>
+
+          <!-- distance row -->
+          <div class="distance-price small d-flex flex-wrap gap-2 mt-1">
+            <span v-if="distanceLabelFor(r)">📍 {{ distanceLabelFor(r) }}</span>
+            <span v-if="gasPriceLabel(r)">{{ gasPriceLabel(r) }}</span>
           </div>
         </div>
 
