@@ -1,23 +1,45 @@
 <template>
-  <div class="card p-3 mt-3">
-    <h5 class="mb-2">AI Chat (Gemini)</h5>
-    <div class="mb-2 small text-muted">
-      Try: <em>“from my home go to Walmart then Target, pick up cat litter at a pet store, end at 123 Main St”</em>
+  <div class="llm-chat-compact">
+    <div class="chat-header" @click="expanded = !expanded">
+      <div class="header-content">
+        <span class="icon"></span>
+        <span class="title">AI Assistant</span>
+      </div>
+      <span class="toggle-icon">{{ expanded ? '▼' : '▶' }}</span>
     </div>
 
-    <textarea v-model="input" class="form-control" rows="3"
-      placeholder="Tell me your route in plain English…"></textarea>
+    <div v-if="expanded" class="chat-body">
+      <div class="quick-tip">
+        Try: "from home to Walmart, then Target, pick up gas"
+      </div>
 
-    <div class="d-flex gap-2 mt-2">
-      <button class="btn btn-primary btn-sm" :disabled="loading" @click="submit">
-        {{ loading ? 'Thinking…' : 'Parse & Add Stops' }}
-      </button>
-      <button class="btn btn-outline-secondary btn-sm" @click="setHome">Set ‘Home’</button>
-    </div>
+      <textarea 
+        v-model="input" 
+        class="chat-input" 
+        rows="3"
+        placeholder="Describe your route in plain English..."
+        @keydown.enter.ctrl="submit"
+      ></textarea>
 
-    <div v-if="debugPlan" class="mt-3">
-      <div class="small text-muted">LLM plan (JSON):</div>
-      <pre class="bg-body-tertiary p-2 small" style="max-height:200px;overflow:auto;">{{ debugPlan }}</pre>
+      <div class="chat-actions">
+        <button 
+          class="btn-submit" 
+          :disabled="loading || !input.trim()" 
+          @click="submit"
+        >
+          {{ loading ? '🔄 Processing...' : '✨ Add Stops' }}
+        </button>
+        <button class="btn-secondary" @click="setHome">
+          🏠 Set Home
+        </button>
+      </div>
+
+      <div v-if="debugPlan" class="debug-section">
+        <details>
+          <summary class="debug-toggle">View parsed plan</summary>
+          <pre class="debug-content">{{ debugPlan }}</pre>
+        </details>
+      </div>
     </div>
   </div>
 </template>
@@ -38,12 +60,15 @@ const emit = defineEmits<{
 const input = ref("");
 const loading = ref(false);
 const debugPlan = ref<string | null>(null);
+const expanded = ref(false);
 
 function setHome() {
   const cur = localStorage.getItem("optipath_home_addr") || "";
   const next = prompt("Enter your Home address (or coordinates):", cur);
-  if (next) localStorage.setItem("optipath_home_addr", next);
-  alert("Home saved.");
+  if (next) {
+    localStorage.setItem("optipath_home_addr", next);
+    alert("✅ Home address saved!");
+  }
 }
 
 async function submit() {
@@ -54,7 +79,6 @@ async function submit() {
   try {
     await ensureGoogleLoaded();
 
-    // 1) Parse itinerary with Gemini (our backend)
     const res = await fetch("/chat/parse-itinerary", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -73,18 +97,15 @@ async function submit() {
     };
     debugPlan.value = JSON.stringify(plan, null, 2);
 
-    // 2) Build list including finish if provided
     const finishProvided = plan.finish_hint !== "none" && !!plan.finish_value;
     const combined = finishProvided ? [...plan.stops, plan.finish_value as string] : [...plan.stops];
 
-    // 3) Resolve to coordinates via Places
     const homeAddress = localStorage.getItem("optipath_home_addr") || undefined;
     const { origin, stops } = await resolveChatPlan(
       { origin_hint: plan.origin_hint, origin_value: plan.origin_value, stops: combined },
       { homeAddress }
     );
 
-    // 4) Split finish back out
     let finish: any | undefined = undefined;
     let stopsOnly = stops;
     if (finishProvided && stops.length) {
@@ -92,7 +113,6 @@ async function submit() {
       stopsOnly = stops.slice(0, -1);
     }
 
-    // 5) Emit normalized objects
     const toApp = (s: any) => ({
       formatted_address: s.formatted_address || s.name,
       name: s.name,
@@ -106,9 +126,11 @@ async function submit() {
       finish: finish ? toApp(finish) : undefined,
       constraints: plan.constraints || []
     });
+
+    input.value = "";
   } catch (e: any) {
     console.error(e);
-    alert(e.message || "Sorry—couldn’t process that request.");
+    alert(e.message || "Sorry—couldn't process that request.");
   } finally {
     loading.value = false;
   }
@@ -116,5 +138,148 @@ async function submit() {
 </script>
 
 <style scoped>
-.card { background: var(--card); border: 1px solid var(--border); }
+.llm-chat-compact {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.chat-header {
+  padding: 0.75rem 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  transition: background 0.2s;
+  user-select: none;
+}
+
+.chat-header:hover {
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
+}
+
+.header-content {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.icon {
+  font-size: 1.2rem;
+}
+
+.title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.toggle-icon {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.chat-body {
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.quick-tip {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+  margin-bottom: 0.75rem;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  border-radius: 6px;
+}
+
+.chat-input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+  margin-bottom: 0.75rem;
+  transition: border-color 0.2s;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.chat-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.btn-submit {
+  flex: 1;
+  padding: 0.75rem;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-submit:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.3);
+}
+
+.btn-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  padding: 0.75rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: var(--text);
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
+.debug-section {
+  margin-top: 1rem;
+}
+
+.debug-toggle {
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.debug-toggle:hover {
+  color: var(--accent);
+}
+
+.debug-content {
+  margin-top: 0.5rem;
+  padding: 0.75rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.75rem;
+  max-height: 150px;
+  overflow: auto;
+  color: var(--text);
+}
 </style>

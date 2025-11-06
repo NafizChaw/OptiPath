@@ -1,20 +1,6 @@
 <template>
   <div>
     <div ref="mapRef" style="width: 100%; height: 420px;"></div>
-
-    <div
-      class="route-summary-panel"
-      v-if="totalDurationSec !== null && totalDistanceMeters !== null && totalTurns !== null"
-    >
-      <div><strong>Total time:</strong> {{ formatMinutes(totalDurationSec) }}</div>
-      <div><strong>Total distance:</strong> {{ formatMiles(totalDistanceMeters) }}</div>
-      <div><strong>Total turns:</strong> {{ formatTurns(totalTurns) }}</div>
-    </div>
-
-    <p v-if="props.strategy"
-       class="text-muted small mt-2">
-      Optimized for: {{ props.strategy }}
-    </p>
   </div>
 </template>
 
@@ -24,12 +10,7 @@ import { ref, onMounted, watch } from "vue";
 const props = defineProps<{
   addresses: Array<any>,
   travelMode: string
-  strategy?: string
 }>();
-
-const totalDurationSec = ref<number | null>(null);
-const totalDistanceMeters = ref<number | null>(null);
-const totalTurns = ref<number | null>(null);
 
 const mapRef = ref<HTMLDivElement | null>(null);
 let map: google.maps.Map | null = null;
@@ -86,30 +67,6 @@ async function renderRoute() {
     (res, status) => {
       if (status === "OK" && res) {
         directionsRenderer.setDirections(res);
-        const legs = res.routes?.[0]?.legs || [];
-
-        // total time (seconds)
-        let durationSum = 0;
-        // total distance (meters)
-        let distanceSum = 0;
-        // total turns (sum of steps)
-        let stepsSum = 0;
-
-        for (const leg of legs) {
-          if (leg.duration?.value != null) {
-            durationSum += leg.duration.value;
-          }
-          if (leg.distance?.value != null) {
-            distanceSum += leg.distance.value;
-          }
-          if (Array.isArray(leg.steps)) {
-            stepsSum += leg.steps.length;
-          }
-        }
-        totalDurationSec.value = durationSum;
-        totalDistanceMeters.value = distanceSum;
-        totalTurns.value = stepsSum;
-
         const bounds = new google.maps.LatLngBounds();
         res.routes[0].overview_path.forEach(p => bounds.extend(p));
         map!.fitBounds(bounds);
@@ -131,41 +88,6 @@ function initMap() {
   renderRoute();
 }
 
-function formatMinutes(sec: number | null): string {
-  if (sec == null) return "—";
-  const mins = Math.round(sec / 60);
-  return `${mins} min`;
-}
-
-function formatMiles(meters: number | null): string {
-  if (meters == null) return "—";
-  const miles = meters / 1609.344;
-  return `${miles.toFixed(1)} mi`;
-}
-
-function formatTurns(turns: number | null): string {
-  if (turns == null) return "—";
-  return `${turns} turns`;
-}
-
 onMounted(() => loadGoogleMapsScript(initMap));
 watch(() => [props.addresses, props.travelMode], renderRoute, { deep: true });
 </script>
-
-<style scoped>
-.route-summary-panel {
-  margin-top: 0.75rem;
-  padding: 0.75rem 1rem;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 0.5rem;
-  background-color: rgba(0,0,0,0.4); /* looks good on dark mode UI */
-  font-size: 0.9rem;
-  line-height: 1.4;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 0.5rem 1rem;
-}
-.route-summary-panel strong {
-  font-weight: 600;
-}
-</style>
