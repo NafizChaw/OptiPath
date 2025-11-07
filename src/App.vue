@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import Navbar from './components/Navbar.vue'
 import MainPage from './pages/MainPage.vue'
+import ThemeToggleFab from './components/ThemeToggleFab.vue'
 
 type Theme = 'light' | 'dark'
 const theme = ref<Theme>('light')
@@ -23,8 +23,6 @@ onMounted(() => {
 </script>
 
 <template>
-  <div id="app">
-    <Navbar :theme="theme" @toggleTheme="toggleTheme" />
-    <MainPage />
-  </div>
+  <MainPage />
+  <ThemeToggleFab :theme="theme" @toggle="toggleTheme" />
 </template>

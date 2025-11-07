@@ -1,25 +1,26 @@
 /// <reference types="google.maps" />
 
+
+
 export type FuelConfig = {
-  currentFuelPercent: number;           // 0..100
-  tankCapacityGallons: number;          // e.g., 15
-  mpg: number;                          // e.g., 25
-  refuelThresholdPercent: number;       // e.g., 25 (¼ tank)
+  currentFuelPercent: number;      
+  tankCapacityGallons: number;     
+  mpg: number;                    
+  refuelThresholdPercent: number;  
 };
 
 export type RouteWithFuel = {
   stops: Array<{
     address: string | google.maps.LatLngLiteral;
     isRefuelStop: boolean;
-    fuelLevelAfter: number;             // % after arriving at this stop
-    distanceFromPrevious?: number;      // miles
+    fuelLevelAfter: number;        
+    distanceFromPrevious?: number; 
   }>;
-  totalDistance: number;
+  totalDistance: number;          
   refuelStopsAdded: number;
   warnings: string[];
 };
 
-/* ---------- helpers ---------- */
 
 async function ensureGoogleLoaded(): Promise<void> {
   if ((window as any).google?.maps) return;
@@ -61,7 +62,12 @@ async function distanceMatrixMiles(
   const svc = new google.maps.DistanceMatrixService();
   const res = await new Promise<google.maps.DistanceMatrixResponse>((resolve, reject) =>
     svc.getDistanceMatrix(
-      { origins: [origin as any], destinations: [destination as any], travelMode: mode, unitSystem: google.maps.UnitSystem.IMPERIAL },
+      {
+        origins: [origin as any],
+        destinations: [destination as any],
+        travelMode: mode,
+        unitSystem: google.maps.UnitSystem.IMPERIAL
+      },
       (r, status) => (status === "OK" && r) ? resolve(r) : reject(new Error(String(status)))
     )
   );
@@ -77,42 +83,111 @@ async function getLegMiles(
   try {
     return await distanceMatrixMiles(a, b, mode);
   } catch {
-    // fallback to haversine
     const A = await geocodeIfNeeded(a);
     const B = await geocodeIfNeeded(b);
     return haversineMiles(A, B);
   }
 }
 
-async function findNearbyGasStation(point: google.maps.LatLngLiteral, radius = 8000) {
+
+async function getRoutePolyline(
+  a: string | google.maps.LatLngLiteral,
+  b: string | google.maps.LatLngLiteral,
+  mode: google.maps.TravelMode
+): Promise<google.maps.LatLngLiteral[] | null> {
   await ensureGoogleLoaded();
-  const places = new google.maps.places.PlacesService(document.createElement("div"));
-  const results = await new Promise<google.maps.places.PlaceResult[]>((resolve) =>
-    places.nearbySearch({ location: point, radius, type: "gas_station" },
-      (r, status) => resolve(status === google.maps.places.PlacesServiceStatus.OK ? (r || []) : [])
+  const ds = new google.maps.DirectionsService();
+  const res = await new Promise<google.maps.DirectionsResult | null>((resolve) =>
+    ds.route(
+      { origin: a as any, destination: b as any, travelMode: mode },
+      (r, status) => resolve(status === "OK" ? r : null)
     )
   );
-  if (!results.length) return null;
-  results.sort((p, q) => (q.rating ?? 0) - (p.rating ?? 0) || (q.user_ratings_total ?? 0) - (p.user_ratings_total ?? 0));
-  const loc = results[0].geometry?.location;
-  return loc ? { lat: loc.lat(), lng: loc.lng() } : null;
+  const path = res?.routes?.[0]?.overview_path;
+  if (!path?.length) return null;
+  return path.map(p => ({ lat: p.lat(), lng: p.lng() }));
 }
 
-async function bestGasBetween(
-  a: string | google.maps.LatLngLiteral,
-  b: string | google.maps.LatLngLiteral
-) {
-  const A = await geocodeIfNeeded(a);
-  const B = await geocodeIfNeeded(b);
-  const probes = [0.33, 0.5, 0.67].map(t => ({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t }));
-  for (const p of probes) {
-    const g = await findNearbyGasStation(p, 8000);
-    if (g) return g;
+function cumulativeMiles(path: google.maps.LatLngLiteral[]): number[] {
+  const cum: number[] = [0];
+  for (let i = 1; i < path.length; i++) {
+    cum[i] = cum[i-1] + haversineMiles(path[i-1], path[i]);
+  }
+  return cum;
+}
+
+function pointAtMiles(
+  path: google.maps.LatLngLiteral[],
+  cum: number[],
+  targetMiles: number
+): google.maps.LatLngLiteral {
+  if (targetMiles <= 0) return path[0];
+  const total = cum[cum.length - 1];
+  if (targetMiles >= total) return path[path.length - 1];
+  let idx = 1;
+  while (idx < cum.length && cum[idx] < targetMiles) idx++;
+  const prev = idx - 1;
+  const segMiles = cum[idx] - cum[prev];
+  const t = segMiles > 0 ? (targetMiles - cum[prev]) / segMiles : 0;
+  const A = path[prev], B = path[idx];
+  return { lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t };
+}
+
+
+async function findNearbyGasStation(point: google.maps.LatLngLiteral, baseRadius = 8000) {
+  await ensureGoogleLoaded();
+  const places = new google.maps.places.PlacesService(document.createElement("div"));
+
+  const tryRadius = async (r: number) =>
+    new Promise<google.maps.places.PlaceResult[]>((resolve) =>
+      places.nearbySearch(
+        { location: point, radius: r, type: "gas_station" },
+        (rslts, status) =>
+          resolve(status === google.maps.places.PlacesServiceStatus.OK ? (rslts || []) : [])
+      )
+    );
+
+  const rings = [baseRadius, baseRadius * 1.5, baseRadius * 2.25, baseRadius * 3];
+  for (const r of rings) {
+    const results = await tryRadius(r);
+    if (results.length) {
+      results.sort(
+        (p, q) =>
+          (q.rating ?? 0) - (p.rating ?? 0) ||
+          (q.user_ratings_total ?? 0) - (p.user_ratings_total ?? 0)
+      );
+      const loc = results[0].geometry?.location;
+      if (loc) return { lat: loc.lat(), lng: loc.lng() };
+    }
   }
   return null;
 }
 
-/* ---------- public API ---------- */
+async function bestGasBetween(
+  a: string | google.maps.LatLngLiteral,
+  b: string | google.maps.LatLngLiteral,
+  mode: google.maps.TravelMode,
+  preferredMilesFromOrigin?: number 
+) {
+  const poly = await getRoutePolyline(a, b, mode);
+  if (poly && poly.length >= 2 && preferredMilesFromOrigin != null) {
+    const cum = cumulativeMiles(poly);
+    const probe = pointAtMiles(poly, cum, preferredMilesFromOrigin);
+    const near = await findNearbyGasStation(probe, 8000);
+    if (near) return near;
+  }
+
+  const A = await geocodeIfNeeded(a);
+  const B = await geocodeIfNeeded(b);
+  const lerp = (t: number) => ({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t });
+
+  for (const t of [0.33, 0.5, 0.67]) {
+    const p = lerp(t);
+    const g = await findNearbyGasStation(p, 8000);
+    if (g) return g;
+  }
+  return await findNearbyGasStation(lerp(0.5), 16000);
+}
 
 export async function addRefuelStops(
   orderedAddresses: Array<string | google.maps.LatLngLiteral>,
@@ -121,7 +196,9 @@ export async function addRefuelStops(
 ): Promise<RouteWithFuel> {
   if (travelMode !== google.maps.TravelMode.DRIVING) {
     return {
-      stops: orderedAddresses.map(a => ({ address: a, isRefuelStop: false, fuelLevelAfter: fuel.currentFuelPercent })),
+      stops: orderedAddresses.map(a => ({
+        address: a, isRefuelStop: false, fuelLevelAfter: fuel.currentFuelPercent
+      })),
       totalDistance: 0,
       refuelStopsAdded: 0,
       warnings: ["Fuel tracking only applies to Driving mode."]
@@ -131,52 +208,86 @@ export async function addRefuelStops(
   const warnings: string[] = [];
   const out: RouteWithFuel["stops"] = [];
 
-  const fullMiles     = fuel.tankCapacityGallons * fuel.mpg;
-  const thresholdMi   = fullMiles * (fuel.refuelThresholdPercent / 100);
-  let remainingMiles  = fullMiles * (fuel.currentFuelPercent / 100);
-  let totalMiles = 0;
-  let refuels = 0;
+  const fullMiles  = fuel.tankCapacityGallons * fuel.mpg; 
+  const minMiles   = fullMiles * (fuel.refuelThresholdPercent / 100); 
+  let remaining    = fullMiles * (fuel.currentFuelPercent / 100);
+  let totalMiles   = 0;
+  let refuels      = 0;
+
+  out.push({
+    address: orderedAddresses[0],
+    isRefuelStop: false,
+    fuelLevelAfter: Math.min(100, (remaining / fullMiles) * 100)
+  });
 
   for (let i = 0; i < orderedAddresses.length - 1; i++) {
-    const o = orderedAddresses[i];
-    const d = orderedAddresses[i + 1];
+    let origin = orderedAddresses[i];
+    const dest = orderedAddresses[i + 1];
 
-    if (i === 0) out.push({ address: o, isRefuelStop: false, fuelLevelAfter: Math.min(100, (remainingMiles / fullMiles) * 100) });
+    while (true) {
+      let legMiles = 0;
+      try { legMiles = await getLegMiles(origin, dest, travelMode); } catch {}
 
-    let leg = 0;
-    try { leg = await getLegMiles(o, d, travelMode); } catch { /* fallback handled */ }
-    totalMiles += leg;
+      const after = remaining - legMiles;
 
-    const wouldDropBelow = (remainingMiles - leg) < thresholdMi;
-    const exceedsRange   = leg > remainingMiles;
-
-    if (wouldDropBelow || exceedsRange) {
-      const gas = await bestGasBetween(o, d);
-      if (gas) {
-        // distance split o->gas and gas->d
-        const toGas = await getLegMiles(o, gas, travelMode);
-        const gasToD = await getLegMiles(gas, d, travelMode);
-
-        remainingMiles -= toGas;
-        out.push({ address: gas, isRefuelStop: true, fuelLevelAfter: 100, distanceFromPrevious: toGas });
-
-        remainingMiles = fullMiles; // refill
-        remainingMiles -= gasToD;
-
-        out.push({ address: d, isRefuelStop: false, fuelLevelAfter: Math.max(0, (remainingMiles / fullMiles) * 100), distanceFromPrevious: gasToD });
-        refuels++;
-        continue;
-      } else {
-        warnings.push("Could not find a gas station on a leg; continuing without insert.");
+      if (after >= minMiles) {
+        remaining = after;
+        totalMiles += legMiles;
+        out.push({
+          address: dest,
+          isRefuelStop: false,
+          fuelLevelAfter: Math.max(0, (remaining / fullMiles) * 100),
+          distanceFromPrevious: legMiles
+        });
+        break; 
       }
-    }
 
-    remainingMiles -= leg;
-    out.push({ address: d, isRefuelStop: false, fuelLevelAfter: Math.max(0, (remainingMiles / fullMiles) * 100), distanceFromPrevious: leg });
+    
+      const bufferMi = Math.max(10, 0.1 * fullMiles); 
+      const targetFromOrigin = Math.max(0, remaining - (minMiles + bufferMi));
+
+      const station = await bestGasBetween(origin, dest, travelMode, targetFromOrigin);
+      if (!station) {
+        warnings.push("No gas station found on a long leg; proceeding without insert.");
+        remaining = Math.max(0, after);
+        totalMiles += legMiles;
+        out.push({
+          address: dest,
+          isRefuelStop: false,
+          fuelLevelAfter: Math.max(0, (remaining / fullMiles) * 100),
+          distanceFromPrevious: legMiles
+        });
+        break;
+      }
+
+      const toStation = await getLegMiles(origin, station, travelMode);
+
+   
+      if (remaining - toStation < 0) {
+        totalMiles += toStation;
+        remaining = 0;
+      } else {
+        totalMiles += toStation;
+        remaining -= toStation;
+      }
+
+      out.push({
+        address: station,
+        isRefuelStop: true,
+        fuelLevelAfter: 100,
+        distanceFromPrevious: toStation
+      });
+      refuels++;
+      remaining = fullMiles; 
+
+      origin = station;
+    }
   }
 
   return { stops: out, totalDistance: totalMiles, refuelStopsAdded: refuels, warnings };
 }
+
+
 
 export function canCompleteWithoutRefuel(totalDistanceMiles: number, cfg: FuelConfig): boolean {
   const currentRange = (cfg.currentFuelPercent / 100) * cfg.tankCapacityGallons * cfg.mpg;
