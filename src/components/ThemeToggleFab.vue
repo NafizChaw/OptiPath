@@ -1,4 +1,4 @@
-<template>
+<!-- <template>
   <div class="fab" role="toolbar" aria-label="Theme switch">
     <a class="brand" href="/" title="OptiPath">🧭 OptiPath</a>
     <button class="toggle" @click="$emit('toggle')">
@@ -49,4 +49,4 @@ defineEmits<{ (e: 'toggle'): void }>()
 @media (max-width: 640px){
   .brand{ display:none; }   /* keep it tiny on phones */
 }
-</style>
+</style> -->

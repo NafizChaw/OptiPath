@@ -29,6 +29,7 @@ let map: google.maps.Map | null = null;
 let directionsService: google.maps.DirectionsService | null = null;
 let directionsRenderer: google.maps.DirectionsRenderer | null = null;
 let isInitialized = ref(false);
+let infoWindows: google.maps.InfoWindow[] = [];
 
 function loadGoogleMaps(): Promise<void> {
   const w = window as any;
@@ -80,10 +81,35 @@ function toGMode(mode: string): google.maps.TravelMode {
   }
 }
 
+function clearInfoWindows() {
+  infoWindows.forEach((iw: any) => {
+    if (iw.close) iw.close();
+    if (iw.setMap) iw.setMap(null);
+  });
+  infoWindows = [];
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remainMins = mins % 60;
+  return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`;
+}
+
+function formatDistance(meters: number): string {
+  const miles = meters / 1609.344;
+  return miles < 0.1 ? `${meters.toFixed(0)}m` : `${miles.toFixed(1)} mi`;
+}
+
 function renderRoute() {
   if (!map || !directionsService || !directionsRenderer || !isInitialized.value) {
     return;
   }
+
+  clearInfoWindows();
 
   if (!props.addresses || props.addresses.length < 2) {
     map.setCenter({ lat: 27.994402, lng: -81.760254 });
@@ -119,6 +145,86 @@ function renderRoute() {
         const bounds = new google.maps.LatLngBounds();
         res.routes[0].overview_path.forEach(p => bounds.extend(p));
         map!.fitBounds(bounds);
+
+        const route = res.routes[0];
+        const legs = route.legs;
+
+        legs.forEach((leg, index) => {
+          const path = leg.steps.map(step => step.path).flat();
+          const midIndex = Math.floor(path.length / 2);
+          const midPoint = path[midIndex];
+
+          const durationText = leg.duration?.text || formatDuration(leg.duration?.value || 0);
+          const distanceText = leg.distance?.text || formatDistance(leg.distance?.value || 0);
+
+          const overlay = new google.maps.OverlayView();
+          
+          overlay.onAdd = function() {
+            const div = document.createElement('div');
+            div.style.cssText = `
+              position: absolute;
+              background: #1f2937;
+              padding: 4px 10px;
+              border-radius: 4px;
+              font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+              font-size: 12px;
+              font-weight: 700;
+              color: #ffffff;
+              box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+              white-space: nowrap;
+              cursor: pointer;
+              transition: all 0.15s ease;
+              border: 1px solid rgba(255,255,255,0.2);
+              pointer-events: auto;
+            `;
+            
+            let showDistance = false;
+            div.textContent = durationText;
+            
+            div.addEventListener('click', () => {
+              showDistance = !showDistance;
+              div.textContent = showDistance ? distanceText : durationText;
+            });
+            
+            div.addEventListener('mouseenter', () => {
+              div.style.background = '#374151';
+              div.style.transform = 'scale(1.08)';
+              div.style.boxShadow = '0 3px 10px rgba(0,0,0,0.5)';
+            });
+            
+            div.addEventListener('mouseleave', () => {
+              div.style.background = '#1f2937';
+              div.style.transform = 'scale(1)';
+              div.style.boxShadow = '0 2px 6px rgba(0,0,0,0.4)';
+            });
+            
+            this.div = div;
+            const panes = this.getPanes();
+            panes!.overlayMouseTarget.appendChild(div);
+          };
+          
+          overlay.draw = function() {
+            if (!this.div) return;
+            const projection = this.getProjection();
+            const position = projection.fromLatLngToDivPixel(midPoint);
+            
+            if (position) {
+              // Offset label slightly upward to avoid overlapping the route line
+              this.div.style.left = (position.x - this.div.offsetWidth / 2) + 'px';
+              this.div.style.top = (position.y - this.div.offsetHeight / 2 - 12) + 'px';
+            }
+          };
+          
+          overlay.onRemove = function() {
+            if (this.div) {
+              this.div.parentNode?.removeChild(this.div);
+              this.div = null;
+            }
+          };
+          
+          overlay.setMap(map!);
+          (infoWindows as any).push(overlay);
+        });
       } else {
         console.warn("Directions failed:", status);
       }
@@ -189,6 +295,7 @@ async function initMap() {
 }
 
 async function retryInit() {
+  clearInfoWindows();
   if (directionsRenderer) directionsRenderer.setMap(null);
   directionsRenderer = null;
   directionsService = null;
@@ -213,6 +320,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  clearInfoWindows();
   if (directionsRenderer) directionsRenderer.setMap(null);
   directionsRenderer = null;
   directionsService = null;

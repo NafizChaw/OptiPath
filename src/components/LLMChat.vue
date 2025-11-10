@@ -3,7 +3,7 @@
     <div class="chat-header" @click="expanded = !expanded">
       <div class="header-content">
         <span class="icon"></span>
-        <span class="title">AI Assistant</span>
+        <span class="title">🤖 AI Assistant</span>
       </div>
       <span class="toggle-icon">{{ expanded ? '▼' : '▶' }}</span>
     </div>

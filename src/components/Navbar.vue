@@ -1,4 +1,4 @@
-<script setup lang="ts">
+<!-- <script setup lang="ts">
 const props = defineProps<{ theme?: 'light' | 'dark' }>()
 const emit = defineEmits<{ (e: 'toggleTheme'): void }>()
 const onToggle = () => emit('toggleTheme')
@@ -28,4 +28,4 @@ const onToggle = () => emit('toggleTheme')
       </button>
     </div>
   </nav>
-</template>
+</template> -->

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { MAX_SELECTABLE_ADDRESSES, WELCOME_MESSAGE } from "../constants";
+import { MAX_SELECTABLE_ADDRESSES, WELCOME_MESSAGE_SHORT, WELCOME_MESSAGE_FULL } from "../constants";
 import AddressComponent from "../components/AddressComponent.vue";
 import MapComponent from "../components/MapComponent.vue";
 import CategorySearch from "../components/CategorySearch.vue";
@@ -10,6 +10,9 @@ import { addRefuelStops, estimateRefuelStops, type FuelConfig } from "../algo/fu
 import Draggable from "vuedraggable";
 import LLMChat from "../components/LLMChat.vue";
 import FuelSettings from "../components/FuelSettings.vue";
+
+const props = defineProps<{ theme?: 'light' | 'dark' }>();
+const emit = defineEmits<{ (e: 'toggleTheme'): void }>();
 
 const selection_state = ref<SelectionState>({
   welcomeAcknowledged: false,
@@ -23,20 +26,25 @@ const selection_state = ref<SelectionState>({
   startIndex: 0,
 });
 
+const preOptimizationOrder = ref<any[] | null>(null);
+
 const showWelcomeModal = ref(true);
+const showFullInfo = ref(false);
 const showSidebar = ref(true);
 const departureTime = ref<Date | null>(new Date());
 const useArrivalTime = ref(false);
 const arrivalTime = ref<Date | null>(null);
 
 const availableTransportationMethods = ["Driving", "Walking", "Bicycling"] as const;
-type TravelModeUI = typeof availableTransportationMethods[number];
 
 const canProceed = computed(() => selection_state.value.selectedAddresses.length >= 2);
 
 const prereqsByUid = ref<Record<string, string[]>>({});
 const finishUid = ref<string | null>(null);
 const editingIndex = ref<number | null>(null);
+
+const showLockModal = ref(false);
+const selectedLockStop = ref<any | null>(null);
 
 function withUid<T extends Record<string, any>>(obj: T): T & { uid: string } {
   if ((obj as any)?.uid) return obj as any;
@@ -58,6 +66,28 @@ const fuelAnalysis = ref<{
   actualStopsAdded: number;
   warnings: string[];
 } | null>(null);
+
+const totalTravelTime = computed(() => {
+  const addresses = selection_state.value.optimumRouteAddressOrder || 
+                   selection_state.value.selectedAddresses;
+  
+  if (!addresses || addresses.length < 2) return 0;
+  
+  return addresses.reduce((total: number, stop: any) => {
+    return total + (stop.travelTimeToNext || 0);
+  }, 0);
+});
+
+const totalTravelDistance = computed(() => {
+  const addresses = selection_state.value.optimumRouteAddressOrder || 
+                   selection_state.value.selectedAddresses;
+  
+  if (!addresses || addresses.length < 2) return 0;
+  
+  return addresses.reduce((total: number, stop: any) => {
+    return total + (stop.distanceToNext || 0);
+  }, 0);
+});
 
 
 function normalizeForMatrix(a: any): string | google.maps.LatLngLiteral {
@@ -141,7 +171,6 @@ function addFromLLM(payload: { origin: any, stops: any[], finish?: any, constrai
   selection_state.value.optimumRouteAddressOrder = null;
 }
 
-function startEdit(i: number) { editingIndex.value = i; }
 function cancelEdit() { editingIndex.value = null; }
 function saveEditedAddress(newAddress: any, index: number) {
   selection_state.value.selectedAddresses[index] = withUid(newAddress);
@@ -265,6 +294,22 @@ function onArrivalChange(e: Event) {
 
 const bestDepartureHint = ref<string | null>(null);
 const isOptimizing = ref(false);
+const isOptimized = ref(false);
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remainMins = mins % 60;
+  return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`;
+}
+
+function formatDistance(meters: number): string {
+  const miles = meters / 1609.344;
+  return miles < 0.1 ? `${meters.toFixed(0)}m` : `${miles.toFixed(1)} mi`;
+}
 
 async function optimizeRoute() {
   const stops = selection_state.value.selectedAddresses;
@@ -273,6 +318,8 @@ async function optimizeRoute() {
     alert("Please add at least 2 stops to optimize.");
     return;
   }
+
+  preOptimizationOrder.value = JSON.parse(JSON.stringify(stops));
 
   console.log("\n🚀 ===== STARTING OPTIMIZATION =====");
   console.log("📍 Stops:", stops.length);
@@ -328,6 +375,32 @@ async function optimizeRoute() {
     let finalOrder = order.map((i) => stops[i]);
     console.log("📋 Ordered stops:", finalOrder.map(s => s.name || s.formatted_address));
 
+    console.log("⏱️ Calculating travel times between stops...");
+    const distanceService = new google.maps.DistanceMatrixService();
+
+    for (let i = 0; i < finalOrder.length - 1; i++) {
+      try {
+        const response = await distanceService.getDistanceMatrix({
+          origins: [normalizeForMatrix(finalOrder[i]) as any],
+          destinations: [normalizeForMatrix(finalOrder[i + 1]) as any],
+          travelMode: mode,
+          ...(mode === google.maps.TravelMode.DRIVING ? {
+            drivingOptions: { departureTime: effectiveDeparture }
+          } : {}),
+        });
+
+        const element = response.rows?.[0]?.elements?.[0];
+        if (element?.status === 'OK') {
+          (finalOrder[i] as any).travelTimeToNext = 
+            element.duration_in_traffic?.value ?? element.duration?.value ?? 0;
+          (finalOrder[i] as any).distanceToNext = element.distance?.value ?? 0;
+          console.log(`  Stop ${i} → ${i+1}: ${formatDuration((finalOrder[i] as any).travelTimeToNext!)} (${formatDistance((finalOrder[i] as any).distanceToNext!)})`);
+        }
+      } catch (error) {
+        console.warn(`Could not get travel time for stop ${i}:`, error);
+      }
+    }
+
     if (fuelSettings.value.enabled && mode === google.maps.TravelMode.DRIVING) {
       console.log("\n⛽ ===== FUEL TRACKING ENABLED =====");
       console.log("Current settings:", {
@@ -363,13 +436,13 @@ async function optimizeRoute() {
         });
 
         if (routeWithFuel.warnings.length > 0) {
-          console.log("⚠️  Warnings:");
+          console.log("⚠️ Warnings:");
           routeWithFuel.warnings.forEach(w => console.log("   -", w));
         }
 
         const stitched = routeWithFuel.stops.map((s) => {
           if (s.isRefuelStop) {
-            console.log("🏁 Adding gas station to route");
+            console.log("⛽ Adding gas station to route");
             return {
               name: "⛽ Gas Station",
               formatted_address: typeof s.address === "string" 
@@ -392,7 +465,7 @@ async function optimizeRoute() {
           });
           
           if (!original) {
-            console.warn("⚠️  Could not match stop:", s.address);
+            console.warn("⚠️ Could not match stop:", s.address);
             return {
               name: "Unknown Stop",
               formatted_address: typeof s.address === "string" ? s.address : "Unknown",
@@ -420,11 +493,16 @@ async function optimizeRoute() {
         alert("Fuel tracking failed: " + (fuelError as Error).message + "\n\nCheck console for details.");
       }
     } else {
-      console.log("⏭️  Skipping fuel tracking (not enabled or not driving)");
+      console.log("⭐️ Skipping fuel tracking (not enabled or not driving)");
     }
 
     console.log("\n📋 Final route has", finalOrder.length, "stops");
     selection_state.value.optimumRouteAddressOrder = finalOrder;
+    
+    selection_state.value.selectedAddresses = [...finalOrder];
+    
+    const startStop = finalOrder[0];
+    selection_state.value.startIndex = 0;
 
     try {
       const addresses = finalOrder.map(normalizeForMatrix);
@@ -439,10 +517,11 @@ async function optimizeRoute() {
           ? `Tip: leaving in ${hint.bestOffsetMin} min may be faster (≈ ${Math.round(hint.bestSeconds / 60)} min total).`
           : `Leaving now is best (≈ ${Math.round(hint.bestSeconds / 60)} min total).`;
     } catch { 
-      console.log("⏭️  Skipping departure hint");
+      console.log("⭐️ Skipping departure hint");
     }
 
     console.log("✅ ===== OPTIMIZATION COMPLETE =====\n");
+    isOptimized.value = true;
   } catch (e) {
     console.error("❌ OPTIMIZATION FAILED:", e);
     alert("Optimization failed: " + (e as Error).message + "\n\nPlease check:\n- Google Maps API key\n- Places API enabled\n- Distance Matrix API enabled\n- Billing enabled");
@@ -483,411 +562,401 @@ function dismissWelcome() {
   showWelcomeModal.value = false;
   selection_state.value.welcomeAcknowledged = true;
 }
+
+function openLockModal(stop: any) {
+  selectedLockStop.value = stop;
+  showLockModal.value = true;
+}
+
+function closeLockModal() {
+  selectedLockStop.value = null;
+  showLockModal.value = false;
+}
+
+function getPrerequisitesFor(uid: string) {
+  return (prereqsByUid.value[uid] || [])
+    .map(prereqUid => selection_state.value.selectedAddresses.find(s => s.uid === prereqUid))
+    .filter(Boolean);
+}
+
+function getDependentsOf(uid: string) {
+  return Object.entries(prereqsByUid.value)
+    .filter(([_, befores]) => befores.includes(uid))
+    .map(([afterUid]) => selection_state.value.selectedAddresses.find(s => s.uid === afterUid))
+    .filter(Boolean);
+}
+
+function hasLocks(uid: string) {
+  const hasPrereqs = (prereqsByUid.value[uid] || []).length > 0;
+  const isDependency = Object.values(prereqsByUid.value).some(arr => arr.includes(uid));
+  return hasPrereqs || isDependency;
+}
+
+function wouldCreateCycle(startUid: string, endUid: string): boolean {
+  const visited = new Set<string>();
+  const queue = [startUid];
+  
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current === endUid) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    
+    Object.entries(prereqsByUid.value).forEach(([afterUid, befores]) => {
+      if (befores.includes(current)) {
+        queue.push(afterUid);
+      }
+    });
+  }
+  return false;
+}
+
+function togglePrerequisite(afterUid: string, beforeUid: string) {
+  const current = prereqsByUid.value[afterUid] || [];
+  const exists = current.includes(beforeUid);
+  
+  if (exists) {
+    const filtered = current.filter(id => id !== beforeUid);
+    if (filtered.length === 0) {
+      const copy = { ...prereqsByUid.value };
+      delete copy[afterUid];
+      prereqsByUid.value = copy;
+    } else {
+      prereqsByUid.value = { ...prereqsByUid.value, [afterUid]: filtered };
+    }
+  } else {
+    if (wouldCreateCycle(beforeUid, afterUid)) {
+      alert('Cannot create this lock: it would create a circular dependency!');
+      return;
+    }
+    prereqsByUid.value = { ...prereqsByUid.value, [afterUid]: [...current, beforeUid] };
+  }
+  
+  selection_state.value.optimumRouteAddressOrder = null;
+}
+
+function isPrerequisiteSelected(afterUid: string, beforeUid: string): boolean {
+  return (prereqsByUid.value[afterUid] || []).includes(beforeUid);
+}
+
+function restoreOriginalOrder() {
+  if (preOptimizationOrder.value) {
+    selection_state.value.selectedAddresses = JSON.parse(JSON.stringify(preOptimizationOrder.value));
+    selection_state.value.optimumRouteAddressOrder = null;
+    isOptimized.value = false;
+    preOptimizationOrder.value = null;
+    
+    // Find and restore original start index
+    const originalStart = selection_state.value.selectedAddresses.findIndex((s, i) => 
+      i === 0 || s.isCurrentLocation
+    );
+    if (originalStart !== -1) {
+      selection_state.value.startIndex = originalStart;
+    }
+  }
+}
 </script>
 
 <template>
-  <div class="map-container">
-    <MapComponent
-      :addresses="Array.isArray(selection_state.optimumRouteAddressOrder) && selection_state.optimumRouteAddressOrder.length > 1
-        ? (selection_state.optimumRouteAddressOrder as any[])
-        : selection_state.selectedAddresses"
-      :travelMode="selection_state.travelMode"
-    />
-  </div>
+  <div class="app-wrapper">
+    <div class="map-container">
+      <MapComponent
+        :addresses="Array.isArray(selection_state.optimumRouteAddressOrder) && selection_state.optimumRouteAddressOrder.length > 1
+          ? (selection_state.optimumRouteAddressOrder as any[])
+          : selection_state.selectedAddresses"
+        :travelMode="selection_state.travelMode"
+      />
+    </div>
 
-  <div v-if="showWelcomeModal" class="modal-overlay" @click.self="dismissWelcome">
-    <div class="welcome-modal">
-      <button class="close-btn" @click="dismissWelcome">&times;</button>
-      <h2>Welcome to OptiPath</h2>
-      <p>{{ WELCOME_MESSAGE }}</p>
-      <button class="btn btn-primary btn-lg mt-3" @click="dismissWelcome">Get Started</button>
+    <div v-if="showWelcomeModal" class="modal-overlay" @click.self="dismissWelcome">
+  <div class="welcome-modal">
+    <button class="close-btn" @click="dismissWelcome">&times;</button>
+
+    <h2>Welcome to OptiPath</h2>
+    <p>{{ showFullInfo ? WELCOME_MESSAGE_FULL : WELCOME_MESSAGE_SHORT }}</p>
+
+    <div class="button-row">
+      <button
+        class="btn btn-primary"
+        @click="showFullInfo = !showFullInfo"
+      >
+        {{ showFullInfo ? 'Show Less' : 'More Details' }}
+      </button>
+      <button class="btn btn-primary accent" @click="dismissWelcome">
+        Get Started
+      </button>
     </div>
   </div>
+</div>
 
-  <div class="sidebar" :class="{ collapsed: !showSidebar }">
-    <button class="sidebar-toggle" @click="showSidebar = !showSidebar">
-      {{ showSidebar ? '‹' : '›' }}
-    </button>
 
-    <div v-if="showSidebar" class="sidebar-content">
-      <div class="sidebar-header">
-        <h3>Plan Your Route</h3>
-        <div class="stop-count">{{ selection_state.selectedAddresses.length }} / {{ MAX_SELECTABLE_ADDRESSES }} stops</div>
+    <div class="sidebar" :class="{ collapsed: !showSidebar }">
+      <button class="sidebar-toggle" @click="showSidebar = !showSidebar">
+        {{ showSidebar ? '‹' : '›' }}
+      </button>
+
+      <div v-if="showSidebar" class="sidebar-content">
+        <!-- Mini Header with Logo and Theme Toggle -->
+        <div class="sidebar-mini-header">
+          <div class="logo-section">
+            <img
+              class="mini-logo"
+              src="/src/assets/images/logo-bg-tp.png"
+              alt="OptiPath"
+            />
+            <!-- <span class="brand-name">OptiPath</span> -->
+          </div>
+          <button
+            class="theme-toggle-mini"
+            @click="emit('toggleTheme')"
+            :title="props.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+          >
+            <span v-if="props.theme === 'dark'">☀️</span>
+            <span v-else>🌙</span>
+          </button>
+        </div>
+
+        <div class="sidebar-header">
+          <h3>Plan Your Route</h3>
+          <div class="stop-count">{{ selection_state.selectedAddresses.length }} / {{ MAX_SELECTABLE_ADDRESSES }} stops</div>
+        </div>
+
+        <div class="mode-selector">
+          <button
+            v-for="mode in availableTransportationMethods"
+            :key="mode"
+            class="mode-btn"
+            :class="{ active: selection_state.travelMode === mode }"
+            @click="selection_state.travelMode = mode">
+            <span v-if="mode === 'Driving'">🚗</span>
+            <span v-else-if="mode === 'Walking'">🚶</span>
+            <span v-else>🚴</span>
+            {{ mode }}
+          </button>
+        </div>
+
+        
+
+        <div class="section">
+          <LLMChat @resolvedStops="addFromLLM" />
+        </div>
+
+        <div class="section" v-if="selection_state.travelMode === 'Driving'">
+          <FuelSettings v-model="fuelSettings" />
+        </div>
+
+        <div class="stops-section">
+          <h5>Your Stops</h5>
+          <div class="quick-actions">
+          <button class="action-btn" @click="useCurrentLocationAsOrigin">Use My Location</button>
+        </div>
+
+          <Draggable
+            v-model="selection_state.selectedAddresses"
+            item-key="uid"
+            handle=".drag-handle"
+            @end="onReordered"
+            class="stops-list"
+            :animation="180"
+            ghost-class="drag-ghost">
+            <template #item="{ element, index }">
+              <div class="stop-card" :class="{ 'has-locks': hasLocks(element.uid) }">
+                <div class="stop-header">
+                  <span class="drag-handle">⋮⋮</span>
+                  <div class="stop-number">
+                    <span v-if="index === selection_state.startIndex" class="badge-start">START</span>
+                    <span v-else-if="finishUid === element.uid" class="badge-end">END</span>
+                    <span v-else>{{ index + 1 }}</span>
+                  </div>
+                  <div class="stop-info">
+                    <div class="stop-name">
+                      <span v-if="element.isRefuelStop">⛽️ </span>
+                      <span v-if="hasLocks(element.uid)">🔒 </span>
+                      {{ element.name || element.formatted_address }}
+                    </div>
+                    <div v-if="element.fuelLevelAfter !== undefined" class="fuel-indicator">
+                      {{ element.fuelLevelAfter.toFixed(0) }}%
+                    </div>
+                  </div>
+                </div>
+
+                <!-- NEW: Travel time to next stop -->
+                <div 
+                  v-if="element.travelTimeToNext !== undefined && index < selection_state.selectedAddresses.length - 1" 
+                  class="travel-info"
+                >
+                  <div class="travel-arrow">↓</div>
+                  <div class="travel-details">
+                    <span class="travel-time">⏱️ {{ formatDuration(element.travelTimeToNext) }}</span>
+                    <span class="travel-distance">📍 {{ formatDistance(element.distanceToNext) }}</span>
+                  </div>
+                </div>
+
+                <!-- Prerequisites display -->
+                <div v-if="getPrerequisitesFor(element.uid).length > 0" class="prereqs-display">
+                  <div class="prereqs-label">📌 Must happen AFTER:</div>
+                  <div class="prereqs-tags">
+                    <span v-for="prereq in getPrerequisitesFor(element.uid)" :key="prereq?.uid || ''" class="prereq-tag">
+                      {{ prereq?.name || prereq?.formatted_address || 'Unknown' }}
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Dependents display -->
+                <div v-if="getDependentsOf(element.uid).length > 0" class="dependents-display">
+                  <div class="dependents-label">🔗 Must happen BEFORE:</div>
+                  <div class="dependents-tags">
+                    <span v-for="dep in getDependentsOf(element.uid)" :key="dep?.uid || ''" class="dependent-tag">
+                      {{ dep?.name || dep?.formatted_address || 'Unknown' }}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="stop-actions">
+                  <button v-if="index !== selection_state.startIndex" class="icon-btn" @click="setAsStartPoint(index)" title="Set as start">Start</button>
+                  <button class="icon-btn" :class="{ active: finishUid === element.uid }" @click="finishUid = finishUid === element.uid ? null : element.uid" title="Set as end">End</button>
+                  <button class="icon-btn lock-btn" :class="{ active: hasLocks(element.uid) }" @click="openLockModal(element)" title="Lock order">
+                    <span v-if="hasLocks(element.uid)">🔒</span>
+                    <span v-else>🔓</span>
+                    Lock
+                  </button>
+                  <button v-if="!element?.isCurrentLocation && !element?.isRefuelStop" class="icon-btn delete" @click="removeSelectedAddress(index)" title="Remove">Remove</button>
+                </div>
+
+                <div v-if="editingIndex === index" class="mt-2">
+                  <AddressComponent @addressSelected="(addr:any) => saveEditedAddress(addr, index)" />
+                  <div class="mt-2">
+                    <button class="btn btn-secondary btn-sm" @click="cancelEdit">Cancel</button>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </Draggable>
+
+          <div v-if="selection_state.selectedAddresses.length < MAX_SELECTABLE_ADDRESSES" class="add-stop">
+            <AddressComponent @addressSelected="handleAddressSelected($event, selection_state.selectedAddresses.length)" />
+          </div>
+
+          <div class="category-search-section">
+            <CategorySearch
+              :center="searchCenter"
+              :radiusMeters="5000"
+              placeholder="Find by category (e.g., 'coffee')"
+              @select="handleCategorySelected"
+              :showLabel="false" />
+          </div>
+        </div>
+
+        <div v-if="fuelAnalysis && fuelSettings.enabled" class="fuel-analysis">
+          <h6>Fuel Analysis</h6>
+          <div class="analysis-grid">
+            <div>Distance: {{ fuelAnalysis.totalDistance.toFixed(1) }} mi</div>
+            <div>Gas Stops: {{ fuelAnalysis.actualStopsAdded }}</div>
+          </div>
+          <div v-for="(warning, idx) in fuelAnalysis.warnings" :key="idx" class="warning">⚠️ {{ warning }}</div>
+        </div>
+
+        <!-- NEW: Total Time Summary -->
+        <div 
+          v-if="totalTravelTime > 0" 
+          class="total-time-summary"
+        >
+          <div class="label">Total Travel Time</div>
+          <div class="value">{{ formatDuration(totalTravelTime) }}</div>
+          <div class="label" style="margin-top: 0.5rem;">Total Distance</div>
+          <div class="value" style="font-size: 1.2rem;">{{ formatDistance(totalTravelDistance) }}</div>
+        </div>
+
+        <div v-if="bestDepartureHint" class="hint-box">
+          💡 {{ bestDepartureHint }}
+        </div>
+
+        <div
+          v-if="Array.isArray(selection_state.optimumRouteAddressOrder) && selection_state.optimumRouteAddressOrder.length > 1"
+          class="export-actions"
+        >
+          <a
+            class="export-btn google"
+            :href="googleMapsLink(selection_state.optimumRouteAddressOrder as any[], selection_state.travelMode)"
+            target="_blank"
+          >
+            Open in Google Maps
+          </a>
+
+          <a
+            class="export-btn apple"
+            :href="appleMapsLink(selection_state.optimumRouteAddressOrder as any[], selection_state.travelMode)"
+            target="_blank"
+          >
+            Open in Apple Maps
+          </a>
+        </div>
       </div>
 
-      <div class="mode-selector">
-        <button
-          v-for="mode in availableTransportationMethods"
-          :key="mode"
-          class="mode-btn"
-          :class="{ active: selection_state.travelMode === mode }"
-          @click="selection_state.travelMode = mode">
-          <span v-if="mode === 'Driving'">🚗</span>
-          <span v-else-if="mode === 'Walking'">🚶</span>
-          <span v-else>🚴</span>
-          {{ mode }}
+      <div class="step-footer" v-if="showSidebar">
+        <button 
+          v-if="isOptimized"
+          class="footer-btn secondary"
+          @click="restoreOriginalOrder"
+        >
+          ↺ Restore Original Order
         </button>
+
+        <button class="footer-btn secondary"
+                v-if="selection_state.addressSelectionCompleted && !isOptimized"
+                @click="selection_state.addressSelectionCompleted = false">← Back</button>
+
+        <button class="footer-btn primary"
+                v-else-if="!isOptimized"
+                :disabled="!canProceed"
+                @click="selection_state.addressSelectionCompleted = true">Next →</button>
+
+        <button class="footer-btn accent"
+                v-if="selection_state.addressSelectionCompleted"
+                :disabled="!canProceed || isOptimizing"
+                @click="optimizeRoute">{{ isOptimizing ? 'Optimizing…' : 'Optimize' }}</button>
       </div>
+    </div>
 
-      <div class="quick-actions">
-        <button class="action-btn" @click="useCurrentLocationAsOrigin">Use My Location</button>
-      </div>
+    <!-- Priority Lock Modal -->
+    <div v-if="showLockModal && selectedLockStop" class="modal-overlay" @click.self="closeLockModal">
+      <div class="lock-modal card">
+        <div class="lock-modal-header">
+          <h4>🔒 Lock Order for: <span class="highlight">{{ selectedLockStop.name || selectedLockStop.formatted_address }}</span></h4>
+          <button class="close-btn" @click="closeLockModal">&times;</button>
+        </div>
 
-      <div class="section">
-        <LLMChat @resolvedStops="addFromLLM" />
-      </div>
+        <p class="lock-modal-description">
+          Select stops that must happen <strong>BEFORE</strong> "{{ selectedLockStop.name || selectedLockStop.formatted_address }}". The optimizer will respect these constraints.
+        </p>
 
-      <div class="section" v-if="selection_state.travelMode === 'Driving'">
-        <FuelSettings v-model="fuelSettings" />
-      </div>
-
-      <div class="stops-section">
-        <h5>Your Stops</h5>
-
-        <Draggable
-          v-model="selection_state.selectedAddresses"
-          item-key="uid"
-          handle=".drag-handle"
-          @end="onReordered"
-          class="stops-list"
-          :animation="180"
-          ghost-class="drag-ghost">
-          <template #item="{ element, index }">
-            <div class="stop-card">
-              <div class="stop-header">
-                <span class="drag-handle">⋮⋮</span>
-                <div class="stop-number">
-                  <span v-if="index === selection_state.startIndex" class="badge-start">START</span>
-                  <span v-else-if="finishUid === element.uid" class="badge-end">END</span>
-                  <span v-else>{{ index + 1 }}</span>
-                </div>
-                <div class="stop-info">
-                  <div class="stop-name">
-                    <span v-if="element.isRefuelStop">⛽︎ </span>
-                    {{ element.name || element.formatted_address }}
-                  </div>
-                  <div v-if="element.fuelLevelAfter !== undefined" class="fuel-indicator">
-                    {{ element.fuelLevelAfter.toFixed(0) }}%
-                  </div>
-                </div>
-              </div>
-
-              <div class="stop-actions">
-                <button v-if="index !== selection_state.startIndex" class="icon-btn" @click="setAsStartPoint(index)" title="Set as start">Start</button>
-                <button class="icon-btn" :class="{ active: finishUid === element.uid }" @click="finishUid = finishUid === element.uid ? null : element.uid" title="Set as end">End</button>
-                <button v-if="!element?.isCurrentLocation && !element?.isRefuelStop" class="icon-btn delete" @click="removeSelectedAddress(index)" title="Remove">Remove</button>
-              </div>
-
-              <div v-if="editingIndex === index" class="mt-2">
-                <AddressComponent @addressSelected="(addr:any) => saveEditedAddress(addr, index)" />
-                <div class="mt-2">
-                  <button class="btn btn-secondary btn-sm" @click="cancelEdit">Cancel</button>
-                </div>
+        <div class="lock-options">
+          <button
+            v-for="stop in selection_state.selectedAddresses.filter(s => s.uid !== selectedLockStop.uid)"
+            :key="stop.uid"
+            class="lock-option-btn"
+            :class="{
+              selected: isPrerequisiteSelected(selectedLockStop.uid, stop.uid),
+              disabled: !isPrerequisiteSelected(selectedLockStop.uid, stop.uid) && wouldCreateCycle(stop.uid, selectedLockStop.uid)
+            }"
+            :disabled="!isPrerequisiteSelected(selectedLockStop.uid, stop.uid) && wouldCreateCycle(stop.uid, selectedLockStop.uid)"
+            @click="togglePrerequisite(selectedLockStop.uid, stop.uid)"
+          >
+            <div class="lock-checkbox">
+              <span v-if="isPrerequisiteSelected(selectedLockStop.uid, stop.uid)">✓</span>
+              <span v-else-if="wouldCreateCycle(stop.uid, selectedLockStop.uid)">✕</span>
+            </div>
+            <div class="lock-option-info">
+              <div class="lock-option-name">{{ stop.name || stop.formatted_address }}</div>
+              <div v-if="!isPrerequisiteSelected(selectedLockStop.uid, stop.uid) && wouldCreateCycle(stop.uid, selectedLockStop.uid)" class="cycle-warning">
+                Would create circular dependency
               </div>
             </div>
-          </template>
-        </Draggable>
-
-        <div v-if="selection_state.selectedAddresses.length < MAX_SELECTABLE_ADDRESSES" class="add-stop">
-          <AddressComponent @addressSelected="handleAddressSelected($event, selection_state.selectedAddresses.length)" />
+          </button>
         </div>
 
-        <div class="category-search-section">
-          <CategorySearch
-            :center="searchCenter"
-            :radiusMeters="5000"
-            placeholder="Find gas stations, groceries, etc."
-            @select="handleCategorySelected"
-            :showLabel="false" />
-        </div>
+        <button class="btn btn-primary" style="width: 100%; margin-top: 1rem;" @click="closeLockModal">Done</button>
       </div>
-
-      <div v-if="fuelAnalysis && fuelSettings.enabled" class="fuel-analysis">
-        <h6>Fuel Analysis</h6>
-        <div class="analysis-grid">
-          <div>Distance: {{ fuelAnalysis.totalDistance.toFixed(1) }} mi</div>
-          <div>Gas Stops: {{ fuelAnalysis.actualStopsAdded }}</div>
-        </div>
-        <div v-for="(warning, idx) in fuelAnalysis.warnings" :key="idx" class="warning">⚠️ {{ warning }}</div>
-      </div>
-
-      <div class="section departure-time" v-if="selection_state.travelMode === 'Driving'">
-        <div class="toggle-row">
-          <label>
-            <input type="checkbox" v-model="useArrivalTime" />
-            Set Arrival Time Instead
-          </label>
-        </div>
-
-        <div v-if="useArrivalTime">
-          <h6>Arrive By</h6>
-          <input
-            type="datetime-local"
-            class="time-input"
-            :value="arrivalTime ? formatLocalDateTime(arrivalTime) : ''"
-            @change="onArrivalChange"
-          />
-          <small class="muted">We'll estimate when to leave to arrive on time.</small>
-        </div>
-        <div v-else>
-          <h6>Leave At</h6>
-          <input
-            type="datetime-local"
-            class="time-input"
-            :value="departureTime ? formatLocalDateTime(departureTime) : ''"
-            @change="onDepartureChange"
-          />
-          <small class="muted">Used to calculate real-time traffic for driving routes.</small>
-        </div>
-      </div>
-
-      <div v-if="bestDepartureHint" class="hint-box">
-        💡 {{ bestDepartureHint }}
-      </div>
-
-      <div
-        v-if="Array.isArray(selection_state.optimumRouteAddressOrder) && selection_state.optimumRouteAddressOrder.length > 1"
-        class="export-actions"
-      >
-        <a
-          class="export-btn google"
-          :href="googleMapsLink(selection_state.optimumRouteAddressOrder as any[], selection_state.travelMode)"
-          target="_blank"
-        >
-          Open in Google Maps
-        </a>
-
-        <a
-          class="export-btn apple"
-          :href="appleMapsLink(selection_state.optimumRouteAddressOrder as any[], selection_state.travelMode)"
-          target="_blank"
-        >
-          Open in Apple Maps
-        </a>
-      </div>
-    </div>
-
-    <div class="step-footer" v-if="showSidebar">
-      <button class="footer-btn secondary"
-              v-if="selection_state.addressSelectionCompleted"
-              @click="selection_state.addressSelectionCompleted = false">← Back</button>
-
-      <button class="footer-btn primary"
-              v-else
-              :disabled="!canProceed"
-              @click="selection_state.addressSelectionCompleted = true">Next →</button>
-
-      <button class="footer-btn accent"
-              v-if="selection_state.addressSelectionCompleted"
-              :disabled="!canProceed || isOptimizing"
-              @click="optimizeRoute">{{ isOptimizing ? 'Optimizing…' : 'Optimize' }}</button>
     </div>
   </div>
 </template>
-
-<style scoped>
-.map-container { position: fixed; inset: 0; z-index: 0; }
-
-.modal-overlay{
-  position: fixed; inset: 0; z-index: 9999;
-  display: grid; place-items: center;
-  background: rgba(0,0,0,.62);
-  backdrop-filter: blur(4px);
-}
-.welcome-modal{
-  position: relative;
-  width: min(600px, 92vw);
-  padding: 2rem;
-  border-radius: 14px;
-  background: var(--card);
-  box-shadow: 0 18px 48px rgba(0,0,0,.35);
-}
-.close-btn{
-  position: absolute; inset: 0 0 auto auto;
-  margin: .75rem;
-  appearance: none; border: 0; background: transparent;
-  font-size: 1.75rem; line-height: 1; cursor: pointer;
-  color: var(--text); opacity: .65; transition: opacity .2s ease;
-}
-.close-btn:hover{ opacity: 1; }
-.welcome-modal h2{ margin: 0 0 .5rem; color: var(--text); }
-.welcome-modal p{ margin: 0; color: var(--muted); line-height: 1.6; }
-
-.sidebar{
-  position: fixed; inset: 0 0 0 auto; width: 420px; height: 100vh;
-  z-index: 1000;
-  background: var(--card);
-  border-left: 1px solid var(--border);
-  box-shadow: -4px 0 20px rgba(0,0,0,.08);
-  transition: transform .3s ease;
-  overflow-y: auto;
-}
-.sidebar.collapsed{ transform: translateX(420px); }
-.sidebar-toggle{
-  position: absolute; left: -40px; top: 50%; transform: translateY(-50%);
-  width: 40px; height: 80px;
-  display: grid; place-items: center;
-  border-radius: 8px 0 0 8px;
-  border: 1px solid var(--border); border-right: 0;
-  background: var(--card); color: var(--text);
-  font-size: 1.25rem; cursor: pointer;
-  box-shadow: -4px 0 16px rgba(0,0,0,.06);
-}
-.sidebar-content{ padding: 1.25rem; padding-bottom: 100px; }
-.sidebar-header{
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 1rem;
-}
-.sidebar-header h3{ margin: 0; font-size: 1.25rem; color: var(--text); }
-.stop-count{
-  font-size: .85rem; color: var(--muted);
-  background: var(--bg); padding: .25rem .6rem; border-radius: 999px;
-  border: 1px solid var(--border);
-}
-
-.mode-selector{ display: grid; grid-template-columns: repeat(3,1fr); gap: .5rem; margin-bottom: 1rem; }
-.mode-btn{
-  padding: .65rem .75rem; border-radius: 10px; font-weight: 600; cursor: pointer;
-  border: 1.5px solid var(--border); background: var(--bg); color: var(--text);
-  transition: border-color .2s ease, transform .06s ease;
-}
-.mode-btn:hover{ border-color: var(--accent); }
-.mode-btn:active{ transform: translateY(1px); }
-.mode-btn.active{ background: var(--accent); border-color: var(--accent); color: #fff; }
-
-.quick-actions{ display: grid; grid-template-columns: 1fr; gap: .5rem; margin-bottom: 1rem; }
-.action-btn{
-  padding: .55rem .7rem; border-radius: 10px; cursor: pointer; font-size: .95rem;
-  border: 1px solid var(--border); background: var(--bg); color: var(--text);
-  transition: border-color .2s ease, background .2s ease;
-}
-.action-btn:hover{ border-color: var(--accent); background: rgba(0,0,0,.02); }
-
-.section{ margin-bottom: 1rem; }
-
-.stops-section{ margin: 1.25rem 0; }
-.stops-section h5{ margin: 0 0 .65rem; font-size: 1.05rem; color: var(--text); }
-
-.stops-list{
-  display: flex; flex-direction: column; gap: .65rem;
-  margin-bottom: 1rem; max-height: 420px; overflow-y: auto;
-}
-.stop-card{
-  padding: .75rem; border-radius: 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  transition: box-shadow .2s ease, border-color .2s ease, transform .06s ease;
-}
-.stop-card:hover{ border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
-.stop-header{ display: flex; align-items: center; gap: .65rem; margin-bottom: .4rem; }
-.drag-handle{
-  user-select: none; cursor: grab; font-weight: 700;
-  color: var(--muted); padding: 2px 6px; border-radius: 6px;
-  border: 1px dashed var(--border); background: var(--card);
-}
-.drag-handle:active{ cursor: grabbing; }
-.stop-number{ min-width: 52px; font-weight: 700; color: var(--accent); }
-.badge-start,.badge-end{
-  display: inline-block; padding: .22rem .5rem; border-radius: 6px;
-  font-size: .72rem; font-weight: 700; color: #fff; background: var(--accent);
-}
-.badge-end{ background: #ef4444; }
-.stop-info{ flex: 1; min-width: 0; }
-.stop-name{ font-weight: 600; color: var(--text); margin-bottom: .15rem; }
-.fuel-indicator{ font-size: .85rem; color: var(--muted); }
-
-.stop-actions{ display: flex; gap: .4rem; justify-content: flex-end; }
-.icon-btn{
-  padding: .4rem .6rem; border-radius: 8px; font-size: .95rem; cursor: pointer;
-  border: 1px solid var(--border); background: var(--bg); color: var(--text);
-  transition: border-color .2s ease, transform .06s ease, background .2s ease;
-}
-.icon-btn:hover{ border-color: var(--accent); transform: translateY(-1px); }
-.icon-btn.active{ background: var(--accent); border-color: var(--accent); color: #fff; }
-.icon-btn.delete:hover{ border-color: #ef4444; background: rgba(239,68,68,.08); }
-
-.drag-ghost{ opacity: .6; background: var(--accent); }
-
-.add-stop{ margin-bottom: 1rem; }
-.category-search-section{ margin-top: 1rem; }
-
-.fuel-analysis{
-  padding: .9rem; border-radius: 12px;
-  background: var(--bg); border: 1px solid var(--border);
-  margin-bottom: 1rem;
-}
-.fuel-analysis h6{ margin: 0 0 .4rem; font-weight: 600; color: var(--text); }
-.analysis-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; font-size: .92rem; color: var(--text); }
-.warning{ margin-top: .4rem; font-size: .85rem; color: #f59e0b; }
-
-.hint-box{
-  padding: .75rem; border-radius: 10px;
-  background: var(--bg); border: 1px solid var(--accent);
-  color: var(--text); font-size: .9rem;
-  margin-bottom: 1rem;
-}
-
-.step-footer{
-  position: fixed; right: 16px; bottom: 16px; z-index: 1100;
-  display: flex; gap: .5rem; flex-wrap: wrap;
-}
-.footer-btn{
-  padding: .65rem 1rem; border-radius: 10px; font-weight: 700; cursor: pointer;
-  border: 1px solid var(--border); background: var(--bg); color: var(--text);
-  transition: transform .06s ease, border-color .2s ease;
-}
-.footer-btn:disabled{ opacity: .55; cursor: not-allowed; }
-.footer-btn.primary{ background: var(--bg); }
-.footer-btn.accent{ background: var(--accent); color: #fff; border-color: var(--accent); }
-.footer-btn.secondary{ opacity: .9; }
-.footer-btn:hover:not(:disabled){ transform: translateY(-1px); }
-
-.departure-time{
-  margin: 1rem 0; padding: .75rem 1rem; border-radius: 10px;
-  background: var(--bg); border: 1px solid var(--border);
-}
-.departure-time h6{ margin: 0 0 .5rem; font-weight: 600; color: var(--text); }
-.time-input{
-  width: 100%; padding: .5rem .6rem; border-radius: 8px;
-  border: 1px solid var(--border); background: var(--card); color: var(--text);
-  transition: border-color .2s ease, box-shadow .2s ease;
-}
-.time-input:focus{
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
-}
-.muted{ color: var(--muted); font-size: .85rem; }
-.toggle-row{
-  display: flex; align-items: center; gap: .5rem;
-  margin-bottom: .5rem; font-size: .92rem; color: var(--text);
-}
-
-.export-actions{ display: grid; gap: .5rem; margin-bottom: 1rem; }
-.export-btn{
-  display: block; text-align: center; font-weight: 600; text-decoration: none;
-  padding: .7rem; border-radius: 10px; transition: transform .06s ease, filter .2s ease;
-}
-.export-btn:hover{ transform: translateY(-1px); filter: brightness(.98); }
-.export-btn.google{ background: #4285f4; color: #fff; }
-.export-btn.google:hover{ filter: brightness(.95); }
-.export-btn.apple{ background: #000; color: #fff; }
-.export-btn.apple:hover{ filter: brightness(.92); }
-
-@media (max-width: 768px){
-  .sidebar{
-    width: 100%; height: 62vh; inset: auto 0 0 0;
-    border-left: 0; border-top: 1px solid var(--border);
-    border-radius: 18px 18px 0 0;
-  }
-  .sidebar.collapsed{ transform: translateY(calc(62vh - 56px)); }
-  .sidebar-toggle{
-    left: 50%; top: -40px; transform: translate(-50%, 0);
-    width: 88px; height: 40px; border-radius: 10px 10px 0 0; border-bottom: 0;
-  }
-  .welcome-modal{ width: 94%; padding: 1.5rem; }
-}
-
-@media (prefers-reduced-motion: reduce){
-  *{ transition: none !important; }
-}
-</style>

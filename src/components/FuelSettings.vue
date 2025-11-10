@@ -70,63 +70,81 @@ watch(() => props.modelValue, v => {
 </script>
 
 <template>
-  <div class="fuel">
-    <div class="head" @click="expanded = !expanded">
-      <div class="row">
-        <span class="icon"></span>
-        <span class="title">Fuel Management</span>
+  <div class="fuel-card">
+    <div class="fuel-header" @click="expanded = !expanded">
+      <div class="fuel-header-left">
+        <span class="fuel-icon">⛽</span>
+        <span class="fuel-title">Fuel Management</span>
       </div>
-      <div class="row">
-        <label class="toggle">
-          <input type="checkbox" v-model="enabled" @click.stop />
-          <span>{{ enabled ? 'On' : 'Off' }}</span>
+      <div class="fuel-header-right">
+        <label class="fuel-toggle" @click.stop>
+          <input type="checkbox" v-model="enabled" />
+          <span class="toggle-text">{{ enabled ? 'On' : 'Off' }}</span>
         </label>
-        <span class="chev">{{ expanded ? '▼' : '▶' }}</span>
+        <span class="chevron-icon">{{ expanded ? '▼' : '▶' }}</span>
       </div>
     </div>
 
-    <div v-if="expanded">
-      <div class="line">
-        <label>Vehicle</label>
-        <select v-model="selPreset" @change="applyPreset(selPreset)">
+    <div v-if="expanded" class="fuel-content">
+      <!-- Vehicle Preset -->
+      <div class="fuel-field">
+        <label class="fuel-label">Vehicle</label>
+        <select v-model="selPreset" @change="applyPreset(selPreset)" class="fuel-select">
           <option v-for="p in presets" :key="p.name" :value="p.name">{{ p.name }}</option>
         </select>
       </div>
 
-      <div class="line">
-        <label>Fuel: {{ currentFuel }}% ({{ gallonsNow }} gal) • Range: ~{{ rangeNow }} mi</label>
-        <input type="range" min="0" max="100" step="5" v-model.number="currentFuel" />
+      <!-- Current Fuel Level -->
+      <div class="fuel-field">
+        <label class="fuel-label">Fuel: {{ currentFuel }}% ({{ gallonsNow }} gal) • Range: ~{{ rangeNow }} mi</label>
+        <input 
+          type="range" 
+          min="0" 
+          max="100" 
+          step="5" 
+          v-model.number="currentFuel"
+          class="fuel-slider"
+        />
       </div>
 
-      <div class="grid">
-        <div class="line">
-          <label>Tank (gal)</label>
-          <input type="number" min="5" max="50" step="0.5" v-model.number="tank" />
+      <!-- Tank and MPG Grid -->
+      <div class="fuel-grid">
+        <div class="fuel-field">
+          <label class="fuel-label">Tank (gal)</label>
+          <input 
+            type="number" 
+            min="5" 
+            max="50" 
+            step="0.5" 
+            v-model.number="tank"
+            class="fuel-input"
+          />
         </div>
-        <div class="line">
-          <label>MPG</label>
-          <input type="number" min="5" max="100" step="1" v-model.number="mpg" />
+        <div class="fuel-field">
+          <label class="fuel-label">MPG</label>
+          <input 
+            type="number" 
+            min="5" 
+            max="100" 
+            step="1" 
+            v-model.number="mpg"
+            class="fuel-input"
+          />
         </div>
       </div>
 
-      <div class="line">
-        <label>Refuel at {{ threshold }}%</label>
-        <input type="range" min="10" max="50" step="5" v-model.number="threshold" />
+      <!-- Refuel Threshold -->
+      <div class="fuel-field">
+        <label class="fuel-label">Refuel at {{ threshold }}%</label>
+        <input 
+          type="range" 
+          min="10" 
+          max="50" 
+          step="5" 
+          v-model.number="threshold"
+          class="fuel-slider"
+        />
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.fuel{ background:var(--bg); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
-.head{ padding:.8rem 1rem; display:flex; align-items:center; justify-content:space-between; cursor:pointer; }
-.row{ display:flex; align-items:center; gap:.6rem; }
-.icon{ font-size:1.1rem; }
-.title{ font-weight:600; }
-.toggle{ display:flex; align-items:center; gap:.4rem; }
-.chev{ color:var(--muted); font-size:.85rem; }
-.line{ display:flex; flex-direction:column; gap:.35rem; padding: .6rem 1rem; }
-.grid{ display:grid; grid-template-columns:1fr 1fr; gap:.5rem; padding:0 1rem 1rem; }
-input[type="number"], select{ padding:.45rem .55rem; border:1px solid var(--border); border-radius:8px; background:var(--card); color:var(--text); }
-input[type="range"]{ width:100%; accent-color:var(--accent); }
-</style>
