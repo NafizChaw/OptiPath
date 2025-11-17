@@ -32,6 +32,8 @@ const arrivalTime = ref<Date | null>(null);
 const availableTransportationMethods = ["Driving", "Walking", "Bicycling"] as const;
 type TravelModeUI = typeof availableTransportationMethods[number];
 
+const routeOptions = ["Fastest", "Shortest Distance"] as const;
+
 const canProceed = computed(() => selection_state.value.selectedAddresses.length >= 2);
 
 const prereqsByUid = ref<Record<string, string[]>>({});
@@ -59,7 +61,6 @@ const fuelAnalysis = ref<{
   warnings: string[];
 } | null>(null);
 
-
 function normalizeForMatrix(a: any): string | google.maps.LatLngLiteral {
   if (a?.latLng) return a.latLng;
   if (a?.isCurrentLocation && a?.latLng) return a.latLng;
@@ -69,6 +70,64 @@ function normalizeForMatrix(a: any): string | google.maps.LatLngLiteral {
 function normalizeForFuel(a: any): string | google.maps.LatLngLiteral {
   if (a?.latLng) return a.latLng;
   return a?.formatted_address || a?.name || "";
+}
+
+async function computeRouteStatsForOrder(
+  stops: any[],
+  mode: google.maps.TravelMode
+): Promise<{ stops: number; distanceText: string; durationText: string }> {
+  if (!stops || stops.length < 2 || typeof google === "undefined") {
+    return { stops: stops?.length ?? 0, distanceText: "N/A", durationText: "N/A" };
+  }
+
+  const service = new google.maps.DistanceMatrixService();
+  let totalMeters = 0;
+  let totalSeconds = 0;
+
+  for (let i = 0; i < stops.length - 1; i++) {
+    const origin = normalizeForMatrix(stops[i]);
+    const dest = normalizeForMatrix(stops[i + 1]);
+
+    const response = await service.getDistanceMatrix({
+      origins: [origin as any],
+      destinations: [dest as any],
+      travelMode: mode,
+      drivingOptions:
+        mode === google.maps.TravelMode.DRIVING && departureTime.value
+          ? { departureTime: departureTime.value }
+          : undefined,
+    });
+
+    const elem = response.rows?.[0]?.elements?.[0];
+    if (!elem || elem.status !== "OK") continue;
+
+    totalMeters += elem.distance?.value ?? 0;
+    totalSeconds +=
+      elem.duration_in_traffic?.value ?? elem.duration?.value ?? 0;
+  }
+
+  const miles = totalMeters / 1609.34;
+  const mins = totalSeconds / 60;
+
+  const distanceText =
+    totalMeters === 0
+      ? "N/A"
+      : miles < 0.1
+      ? `${Math.round(miles * 5280)} ft`
+      : `${miles.toFixed(1)} mi`;
+
+  let durationText = "N/A";
+  if (totalSeconds > 0) {
+    if (mins < 60) {
+      durationText = `${Math.round(mins)} min`;
+    } else {
+      const h = Math.floor(mins / 60);
+      const m = Math.round(mins % 60);
+      durationText = m ? `${h} h ${m} min` : `${h} h`;
+    }
+  }
+
+  return { stops: stops.length, distanceText, durationText };
 }
 
 const searchCenter = ref<{ lat: number; lng: number } | null>(null);
@@ -139,6 +198,7 @@ function addFromLLM(payload: { origin: any, stops: any[], finish?: any, constrai
     }
   }
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 }
 
 function startEdit(i: number) { editingIndex.value = i; }
@@ -146,12 +206,14 @@ function cancelEdit() { editingIndex.value = null; }
 function saveEditedAddress(newAddress: any, index: number) {
   selection_state.value.selectedAddresses[index] = withUid(newAddress);
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
   editingIndex.value = null;
 }
 
 const handleAddressSelected = (newAddress: any, index: number) => {
   selection_state.value.selectedAddresses[index] = withUid(newAddress);
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 };
 
 const removeSelectedAddress = (index: number) => {
@@ -166,10 +228,12 @@ const removeSelectedAddress = (index: number) => {
   }
   if (selection_state.value.startIndex > index) selection_state.value.startIndex--;
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 };
 
 async function onReordered() {
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 }
 
 async function useCurrentLocationAsOrigin() {
@@ -200,9 +264,30 @@ async function useCurrentLocationAsOrigin() {
   }
 }
 
+function useDifferentStart() {
+  selection_state.value.useCurrentLocation = false;
+
+  const idx = selection_state.value.selectedAddresses
+    .findIndex(a => a?.isCurrentLocation);
+
+  if (idx !== -1) {
+    selection_state.value.selectedAddresses.splice(idx, 1);
+
+    if (selection_state.value.startIndex === idx) {
+      selection_state.value.startIndex = 0;
+    } else if (selection_state.value.startIndex > idx) {
+      selection_state.value.startIndex--;
+    }
+
+    selection_state.value.optimumRouteAddressOrder = null;
+    routeStats.value = null;
+  }
+}
+
 function setAsStartPoint(index: number) {
   selection_state.value.startIndex = index;
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 }
 
 function toGMode(mode: string): google.maps.TravelMode {
@@ -264,6 +349,11 @@ function onArrivalChange(e: Event) {
 }
 
 const bestDepartureHint = ref<string | null>(null);
+const routeStats = ref<{
+  stops: number;
+  distanceText: string;
+  durationText: string;
+} | null>(null);
 const isOptimizing = ref(false);
 
 async function optimizeRoute() {
@@ -283,6 +373,7 @@ async function optimizeRoute() {
   fuelAnalysis.value = null;
   isOptimizing.value = true;
   selection_state.value.optimumRouteAddressOrder = null;
+  routeStats.value = null;
 
   try {
     await ensureGoogleLoaded();
@@ -321,6 +412,7 @@ async function optimizeRoute() {
         departureTime: effectiveDeparture,
         prerequisites,
         endIndex,
+        strategy: selection_state.value.routeOption,
       }
     );
     console.log("Best route computed, order:", order);
@@ -427,6 +519,13 @@ async function optimizeRoute() {
     selection_state.value.optimumRouteAddressOrder = finalOrder;
 
     try {
+      routeStats.value = await computeRouteStatsForOrder(finalOrder, mode);
+    } catch (statsError) {
+      console.error("❌ ROUTE STATS ERROR:", statsError);
+      routeStats.value = null;
+    }
+
+    try {
       const addresses = finalOrder.map(normalizeForMatrix);
       const hint = await suggestBestDeparture(addresses as any, mode, [0, 15, 30], {
         startIndex: selection_state.value.startIndex ?? 0,
@@ -447,6 +546,7 @@ async function optimizeRoute() {
     console.error("❌ OPTIMIZATION FAILED:", e);
     alert("Optimization failed: " + (e as Error).message + "\n\nPlease check:\n- Google Maps API key\n- Places API enabled\n- Distance Matrix API enabled\n- Billing enabled");
     selection_state.value.optimumRouteAddressOrder = null;
+    routeStats.value = null;
   } finally {
     isOptimizing.value = false;
   }
@@ -530,7 +630,12 @@ function dismissWelcome() {
       </div>
 
       <div class="quick-actions">
-        <button class="action-btn" @click="useCurrentLocationAsOrigin">Use My Location</button>
+        <button class="action-btn" @click="useCurrentLocationAsOrigin">
+          Use My Location
+        </button>
+        <button class="action-btn" @click="useDifferentStart">
+          Use Other Location
+        </button>
       </div>
 
       <div class="section">
@@ -595,10 +700,16 @@ function dismissWelcome() {
         <div class="category-search-section">
           <CategorySearch
             :center="searchCenter"
+            :lastPoint="
+              selection_state.selectedAddresses.length
+                ? selection_state.selectedAddresses[selection_state.selectedAddresses.length - 1].latLng
+                : searchCenter
+            "
             :radiusMeters="5000"
-            placeholder="Find gas stations, groceries, etc."
+            placeholder="Search nearby (gas, groceries, etc.)"
             @select="handleCategorySelected"
-            :showLabel="false" />
+            :showLabel="false"
+          />
         </div>
       </div>
 
@@ -609,6 +720,32 @@ function dismissWelcome() {
           <div>Gas Stops: {{ fuelAnalysis.actualStopsAdded }}</div>
         </div>
         <div v-for="(warning, idx) in fuelAnalysis.warnings" :key="idx" class="warning">⚠️ {{ warning }}</div>
+      </div>
+
+      <div class="section">
+        <div class="route-pref-card">
+          <div class="route-pref-header">Route Preference</div>
+          <div class="route-options">
+            <button
+              v-for="option in routeOptions"
+              :key="option"
+              class="route-chip"
+              :class="{ active: selection_state.routeOption === option }"
+              @click="selection_state.routeOption = option"
+            >
+              {{ option }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="routeStats" class="route-stats">
+        <h6>Route Summary</h6>
+        <div class="analysis-grid">
+          <div>Stops: {{ routeStats.stops }}</div>
+          <div>Distance: {{ routeStats.distanceText }}</div>
+          <div>Duration: {{ routeStats.durationText }}</div>
+        </div>
       </div>
 
       <div class="section departure-time" v-if="selection_state.travelMode === 'Driving'">
@@ -746,16 +883,60 @@ function dismissWelcome() {
 }
 
 .mode-selector{ display: grid; grid-template-columns: repeat(3,1fr); gap: .5rem; margin-bottom: 1rem; }
+
 .mode-btn{
   padding: .65rem .75rem; border-radius: 10px; font-weight: 600; cursor: pointer;
   border: 1.5px solid var(--border); background: var(--bg); color: var(--text);
   transition: border-color .2s ease, transform .06s ease;
 }
+
+.route-pref-card{
+  padding: .75rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.route-pref-header{
+  font-size: .9rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: .4rem;
+}
+
+.route-options{
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+}
+
+.route-chip{
+  flex: 1 1 0;
+  padding: .4rem .6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-size: .85rem;
+  cursor: pointer;
+  text-align: center;
+}
+
+.route-chip.active{
+  border-color: var(--accent);
+  background: rgba(59,130,246,.14);
+}
+
 .mode-btn:hover{ border-color: var(--accent); }
 .mode-btn:active{ transform: translateY(1px); }
 .mode-btn.active{ background: var(--accent); border-color: var(--accent); color: #fff; }
 
-.quick-actions{ display: grid; grid-template-columns: 1fr; gap: .5rem; margin-bottom: 1rem; }
+.quick-actions{ 
+  display: grid; 
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .5rem; 
+  margin-bottom: 1rem; 
+}
 .action-btn{
   padding: .55rem .7rem; border-radius: 10px; cursor: pointer; font-size: .95rem;
   border: 1px solid var(--border); background: var(--bg); color: var(--text);
@@ -819,6 +1000,20 @@ function dismissWelcome() {
 .fuel-analysis h6{ margin: 0 0 .4rem; font-weight: 600; color: var(--text); }
 .analysis-grid{ display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; font-size: .92rem; color: var(--text); }
 .warning{ margin-top: .4rem; font-size: .85rem; color: #f59e0b; }
+
+.route-stats{
+  padding: .9rem;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.route-stats h6{
+  margin: 0 0 .4rem;
+  font-weight: 600;
+  color: var(--text);
+}
 
 .hint-box{
   padding: .75rem; border-radius: 10px;
