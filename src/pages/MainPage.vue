@@ -814,13 +814,28 @@ function restoreOriginalOrder() {
 
                 <div class="stop-actions">
                   <button v-if="index !== selection_state.startIndex" class="icon-btn" @click="setAsStartPoint(index)" title="Set as start">Start</button>
-                  <button class="icon-btn" :class="{ active: finishUid === element.uid }" @click="finishUid = finishUid === element.uid ? null : element.uid" title="Set as end">End</button>
-                  <button class="icon-btn lock-btn" :class="{ active: hasLocks(element.uid) }" @click="openLockModal(element)" title="Lock order">
+                  <button 
+                    v-if="index === selection_state.startIndex && finishUid !== element.uid"
+                    class="icon-btn" 
+                    @click="setAsEndPoint(element.uid)" 
+                    title="Set as end">End</button>
+                  <button 
+                    v-if="index !== selection_state.startIndex"
+                    class="icon-btn" 
+                    :class="{ active: finishUid === element.uid }" 
+                    @click="finishUid = finishUid === element.uid ? null : element.uid" 
+                    title="Set as end">End</button>
+                  <button 
+                    v-if="index !== selection_state.startIndex"
+                    class="icon-btn lock-btn" 
+                    :class="{ active: hasLocks(element.uid) }" 
+                    @click="openLockModal(element)" 
+                    title="Lock order">
                     <span v-if="hasLocks(element.uid)">🔒</span>
                     <span v-else>🔓</span>
                     Lock
                   </button>
-                  <button v-if="!element?.isCurrentLocation && !element?.isRefuelStop" class="icon-btn delete" @click="removeSelectedAddress(index)" title="Remove">Remove</button>
+                  <button v-if="!element?.isRefuelStop" class="icon-btn delete" @click="removeSelectedAddress(index)" title="Remove">Remove</button>
                 </div>
 
                 <div v-if="editingIndex === index" class="mt-2">
